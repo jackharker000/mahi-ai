@@ -14,18 +14,12 @@
 //! ```
 //! use std::sync::Arc;
 //! use mahi_tooling::{MockComputerController, ToolRegistry};
-//! use mahi_contracts::tooling::ToolInvokeContract;
-//! use mahi_contracts::types::ComputeMode;
 //!
-//! # tokio_test::block_on(async {
 //! let controller = Arc::new(MockComputerController::new());
 //! let registry = ToolRegistry::with_builtins(controller);
-//! let tools = registry.describe(ComputeMode::MacLan).await;
-//! assert!(tools.iter().any(|t| t.id == "file_read"));
-//! # });
+//! // registry implements mahi_contracts::tooling::ToolInvokeContract:
+//! // registry.describe(mode).await / registry.invoke(call, cancel).await
 //! ```
-//!
-//! (Doctest illustrative; see `tests/` for the executable suite.)
 //!
 //! ## Safety model
 //!
@@ -38,8 +32,6 @@
 //! - Computer-use input tools additionally refuse outright when
 //!   [`ComputerController::is_sensitive_context`] reports a login/payment
 //!   surface, so approvals cannot leak credentials.
-
-#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod computer;
 pub mod connector;
