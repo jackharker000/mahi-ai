@@ -1,0 +1,54 @@
+name: macOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-app:
+    name: build Mahi.app (unsigned)
+    runs-on: macos-14
+    # This job is advisory: the app build needs Apple code-signing to produce a
+    # runnable artifact, and forks / fresh clones won't have signing configured.
+    # We build with signing disabled (CODE_SIGNING_ALLOWED=NO below) so the job
+    # normally succeeds, but `continue-on-error` keeps a missing-signing or
+    # Xcode-version hiccup from blocking Rust-only PRs. Treat a red run here as
+    # a warning, not a merge blocker.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain (Apple targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-xcframework
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build Mahi.xcframework (Rust core + UniFFI Swift bindings)
+        run: ./scripts/build-xcframework.sh
+
+      - name: Generate Xcode project
+        working-directory: macos
+        run: xcodegen generate
+
+      - name: Build Mahi scheme (signing disabled)
+        working-directory: macos
+        run: |
+          xcodebuild build \
+            -project Mahi.xcodeproj \
+            -scheme Mahi \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
