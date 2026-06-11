@@ -267,10 +267,11 @@ to unblock Phase 0 — see [`DECISIONS.md`](./DECISIONS.md) — and they remain 
 
 ---
 
-## 11. Suggested next step
+## 11. Next step
 
-When you've picked a direction on the §10 questions, the natural next move is to **spin up a second
-round of agents — one per phase or per domain — to produce the implementation-level plan** (concrete
-module layout, the contract type definitions in the chosen language, and a task breakdown) for
-whichever slice you want to build first. Phase 0 (lock the contracts + trust backbone) is the
-recommended starting point regardless of the §10 answers.
+Provisional defaults for the §10 calls are recorded in [`DECISIONS.md`](./DECISIONS.md), and the
+**Phase 0 implementation plan now exists** under [`phase-0/`](./phase-0/README.md) — workspace +
+contracts ([01](./phase-0/01-workspace-and-contracts.md)) and the trust backbone
+([02](./phase-0/02-trust-backbone.md)), with a merged task sequence and exit criteria. The next
+move is executing it, starting at Task 0.1 (workspace skeleton) — after the owner reviews the
+provisional decisions, since D0 (Rust core) is baked into the Phase 0 plan.
