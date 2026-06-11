@@ -257,7 +257,8 @@ messaging bridges, multi-user).
 ## 10. Decisions needed from you
 
 These are the product-level calls that change the architecture (everything else is a deferrable
-tech choice with a sensible default in §7):
+tech choice with a sensible default in §7). **Provisional defaults for all four have been adopted
+to unblock Phase 0 — see [`DECISIONS.md`](./DECISIONS.md) — and they remain yours to override:**
 
 1. **Shared-core language (§5)** — adopt *Rust portable core + Swift native shims* (recommended), or prefer a TypeScript core and accept a separate native mode-A implementation?
 2. **Mode-preference order (§6)** — confirm the local-first intent: prefer Mac-LAN (B) > Mac-remote (C) > hosted (D), with on-device (A) as the offline/privacy default? Or is the literal "D→C→B→A" the intended *preference*?
