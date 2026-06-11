@@ -185,6 +185,7 @@ pub(crate) fn urlencode(value: &str) -> String {
 }
 
 /// Build the events for a fetched page: a citation followed by the result.
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
 pub(crate) fn fetch_events(url: &str, status: u16, html: &str) -> Vec<ToolEvent> {
     let title = extract_title(html);
     let text = strip_tags(html);
@@ -217,6 +218,7 @@ pub(crate) fn fetch_events(url: &str, status: u16, html: &str) -> Vec<ToolEvent>
 }
 
 /// Build the events for a search: one citation per hit, then the result.
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
 pub(crate) fn search_events(query: &str, hits: &[SearchHit]) -> Vec<ToolEvent> {
     let mut events: Vec<ToolEvent> = hits
         .iter()
@@ -497,6 +499,25 @@ mod tests {
                 assert!(!truncated);
                 assert_eq!(output["status"], 200);
                 assert_eq!(output["title"], "Example");
+            }
+            other => panic!("expected result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_events_emit_one_citation_per_hit_then_result() {
+        let hits = vec![
+            SearchHit { url: "https://a.example".into(), title: "A".into(), snippet: None },
+            SearchHit { url: "https://b.example".into(), title: "B".into(), snippet: Some("bee".into()) },
+        ];
+        let events = search_events("letters", &hits);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], ToolEvent::Citation { url, .. } if url == "https://a.example"));
+        assert!(matches!(&events[1], ToolEvent::Citation { url, .. } if url == "https://b.example"));
+        match &events[2] {
+            ToolEvent::Result { output, .. } => {
+                assert_eq!(output["query"], "letters");
+                assert_eq!(output["results"].as_array().map(Vec::len), Some(2));
             }
             other => panic!("expected result, got {other:?}"),
         }
