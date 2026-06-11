@@ -138,12 +138,11 @@ impl SessionManager {
     // TODO(contracts): ConnectivityError has no session-specific variant;
     // Transport { message } is the closest frozen fit for rejection reasons.
     pub fn validate(&self, token: &SessionToken) -> Result<(), ConnectivityError> {
-        let expected = self.sign(token);
-        // Constant-time comparison via the hmac crate.
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key).expect("hmac accepts any key length");
+        // Constant-time signature check via the hmac crate.
+        let mut mac =
+            HmacSha256::new_from_slice(&self.signing_key).expect("hmac accepts any key length");
         mac.update(&Self::canonical_bytes(token));
         if mac.verify_slice(&token.hmac).is_err() {
-            debug_assert_ne!(expected, token.hmac);
             return Err(session_err(token.session_id, "invalid token signature"));
         }
         self.ensure_active(token.session_id)
