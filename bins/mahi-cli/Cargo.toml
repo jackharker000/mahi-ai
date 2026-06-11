@@ -1,0 +1,25 @@
+[package]
+name = "mahi-cli"
+description = "Mahi command-line interface."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mahi"
+path = "src/main.rs"
+
+[dependencies]
+mahi-contracts = { workspace = true, features = ["testkit"] }
+mahi-agent-core.workspace = true
+mahi-compute.workspace = true
+mahi-data.workspace = true
+mahi-tooling.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
+futures.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

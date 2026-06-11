@@ -1,0 +1,19 @@
+[package]
+name = "mahi-ffi"
+description = "UniFFI bindings exposing the Mahi core to Swift/Kotlin."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+mahi-contracts.workspace = true
+mahi-agent-core.workspace = true
+mahi-data.workspace = true
+mahi-compute.workspace = true
+tokio.workspace = true
+futures.workspace = true
