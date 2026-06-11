@@ -49,7 +49,9 @@ impl CapabilitySet {
         CapabilitySet {
             vision: self.vision && !other.vision,
             tool_calling: self.tool_calling && !other.tool_calling,
-            min_context_window: self.min_context_window.saturating_sub(other.min_context_window),
+            min_context_window: self
+                .min_context_window
+                .saturating_sub(other.min_context_window),
             code_gen: self.code_gen && !other.code_gen,
         }
     }
@@ -81,7 +83,10 @@ pub struct PerfProfile {
 
 impl Default for PerfProfile {
     fn default() -> Self {
-        Self { ttft_ms: 0, tok_per_sec: 0.0 }
+        Self {
+            ttft_ms: 0,
+            tok_per_sec: 0.0,
+        }
     }
 }
 

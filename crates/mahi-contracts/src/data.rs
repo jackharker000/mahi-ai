@@ -104,10 +104,21 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ContentBlock {
-    Text { text: String },
-    ToolCall { call_id: String, tool_id: String, args: serde_json::Value },
-    ToolResult { call_id: String, output: serde_json::Value },
-    ArtifactRef { artifact_id: Uuid },
+    Text {
+        text: String,
+    },
+    ToolCall {
+        call_id: String,
+        tool_id: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        call_id: String,
+        output: serde_json::Value,
+    },
+    ArtifactRef {
+        artifact_id: Uuid,
+    },
 }
 
 /// A persistent memory fact about the user/project.

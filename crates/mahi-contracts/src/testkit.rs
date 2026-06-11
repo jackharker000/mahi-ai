@@ -26,14 +26,18 @@ pub struct MockInferenceProvider {
 
 impl Default for MockInferenceProvider {
     fn default() -> Self {
-        Self { reply: "Hello from Mahi. This is the on-device mock model.".to_string() }
+        Self {
+            reply: "Hello from Mahi. This is the on-device mock model.".to_string(),
+        }
     }
 }
 
 impl MockInferenceProvider {
     /// A provider that echoes the user's last message back.
     pub fn echo() -> Self {
-        Self { reply: String::new() }
+        Self {
+            reply: String::new(),
+        }
     }
 }
 
@@ -57,7 +61,10 @@ impl InferenceProvider for MockInferenceProvider {
             size_bytes: None,
             quantization: None,
             source: ModelSource::OnDevice,
-            perf_profile: PerfProfile { ttft_ms: 20, tok_per_sec: 40.0 },
+            perf_profile: PerfProfile {
+                ttft_ms: 20,
+                tok_per_sec: 40.0,
+            },
         }
     }
 
@@ -71,7 +78,11 @@ impl InferenceProvider for MockInferenceProvider {
         _cancel: CancellationToken,
     ) -> Result<InferenceStream, ContractError> {
         let reply = if self.reply.is_empty() {
-            let last = req.messages.last().map(|m| m.text_content()).unwrap_or_default();
+            let last = req
+                .messages
+                .last()
+                .map(|m| m.text_content())
+                .unwrap_or_default();
             format!("You said: {last}")
         } else {
             self.reply.clone()
@@ -81,7 +92,10 @@ impl InferenceProvider for MockInferenceProvider {
             .split_inclusive(' ')
             .map(|w| Ok(InferenceChunk::text(w.to_string(), ComputeMode::OnDevice)))
             .collect();
-        chunks.push(Ok(InferenceChunk::finish(FinishReason::Stop, ComputeMode::OnDevice)));
+        chunks.push(Ok(InferenceChunk::finish(
+            FinishReason::Stop,
+            ComputeMode::OnDevice,
+        )));
 
         Ok(Box::pin(stream::iter(chunks)))
     }
@@ -134,7 +148,13 @@ impl ConversationStore for MemBackend {
         Ok(())
     }
     async fn list(&self, limit: usize) -> Result<Vec<Conversation>, ContractError> {
-        let mut v: Vec<_> = self.conversations.lock().unwrap().values().cloned().collect();
+        let mut v: Vec<_> = self
+            .conversations
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         v.truncate(limit);
         Ok(v)
@@ -147,7 +167,11 @@ impl MessageStore for MemBackend {
         self.messages.lock().unwrap().push(msg);
         Ok(())
     }
-    async fn range(&self, conversation_id: Uuid, limit: usize) -> Result<Vec<Message>, ContractError> {
+    async fn range(
+        &self,
+        conversation_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Message>, ContractError> {
         let mut v: Vec<_> = self
             .messages
             .lock()
@@ -269,7 +293,10 @@ impl SettingsStore for MemBackend {
         Ok(self.settings.lock().unwrap().get(key).cloned())
     }
     async fn set(&self, setting: Setting) -> Result<(), ContractError> {
-        self.settings.lock().unwrap().insert(setting.key.clone(), setting);
+        self.settings
+            .lock()
+            .unwrap()
+            .insert(setting.key.clone(), setting);
         Ok(())
     }
 }
@@ -336,7 +363,13 @@ impl PermissionService for MemBackend {
         Ok(())
     }
     async fn revoke(&self, grant_id: Uuid) -> Result<(), ContractError> {
-        if let Some(g) = self.grants.lock().unwrap().iter_mut().find(|g| g.grant_id == grant_id) {
+        if let Some(g) = self
+            .grants
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|g| g.grant_id == grant_id)
+        {
             g.revoked_at = Some(chrono::Utc::now());
         }
         Ok(())

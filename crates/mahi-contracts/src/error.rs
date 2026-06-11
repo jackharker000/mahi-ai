@@ -65,7 +65,9 @@ pub enum ConnectivityError {
     #[error("peer unreachable: {peer_id}")]
     PeerUnreachable { peer_id: uuid::Uuid },
     #[error("channel {channel:?} is not open")]
-    ChannelClosed { channel: crate::connectivity::ChannelId },
+    ChannelClosed {
+        channel: crate::connectivity::ChannelId,
+    },
     #[error("transport error: {message}")]
     Transport { message: String },
 }

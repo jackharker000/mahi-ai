@@ -11,7 +11,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// A stream of inference chunks produced by a provider.
-pub type InferenceStream = Pin<Box<dyn Stream<Item = Result<InferenceChunk, ContractError>> + Send>>;
+pub type InferenceStream =
+    Pin<Box<dyn Stream<Item = Result<InferenceChunk, ContractError>> + Send>>;
 
 /// A single inference request, mode-agnostic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +113,11 @@ pub struct CanHandleResult {
 impl CanHandleResult {
     /// A "yes, fully capable" result.
     pub fn capable() -> Self {
-        Self { capable: true, missing_caps: CapabilitySet::none(), escalation_hint: None }
+        Self {
+            capable: true,
+            missing_caps: CapabilitySet::none(),
+            escalation_hint: None,
+        }
     }
 }
 

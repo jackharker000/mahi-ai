@@ -59,11 +59,27 @@ pub type ToolEventStream = Pin<Box<dyn Stream<Item = Result<ToolEvent, ContractE
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToolEvent {
-    Chunk { data: String },
-    Citation { url: String, title: Option<String>, excerpt: Option<String> },
-    ApprovalRequired { approval_id: Uuid, summary: String, destructive_level: DestructiveLevel },
-    Result { output: serde_json::Value, truncated: bool },
-    Error { message: String, retryable: bool },
+    Chunk {
+        data: String,
+    },
+    Citation {
+        url: String,
+        title: Option<String>,
+        excerpt: Option<String>,
+    },
+    ApprovalRequired {
+        approval_id: Uuid,
+        summary: String,
+        destructive_level: DestructiveLevel,
+    },
+    Result {
+        output: serde_json::Value,
+        truncated: bool,
+    },
+    Error {
+        message: String,
+        retryable: bool,
+    },
     Cancelled,
 }
 

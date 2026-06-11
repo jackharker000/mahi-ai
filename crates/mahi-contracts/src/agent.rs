@@ -11,7 +11,11 @@ use uuid::Uuid;
 #[serde(tag = "type")]
 pub enum AgentEvent {
     /// A turn has begun.
-    TurnStarted { conversation_id: Uuid, message_id: Uuid, mode: ComputeMode },
+    TurnStarted {
+        conversation_id: Uuid,
+        message_id: Uuid,
+        mode: ComputeMode,
+    },
     /// A chunk of assistant text.
     TextDelta { text: String },
     /// A tool produced an event.
