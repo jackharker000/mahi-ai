@@ -21,7 +21,10 @@ impl ApprovalRegistry {
     pub(crate) fn register(&self) -> (Uuid, oneshot::Receiver<bool>) {
         let id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().expect("approval registry lock poisoned").insert(id, tx);
+        self.pending
+            .lock()
+            .expect("approval registry lock poisoned")
+            .insert(id, tx);
         (id, rx)
     }
 
@@ -40,7 +43,10 @@ impl ApprovalRegistry {
 
     /// Drop a pending approval without resolving it (e.g. the turn was cancelled).
     pub(crate) fn discard(&self, id: Uuid) {
-        self.pending.lock().expect("approval registry lock poisoned").remove(&id);
+        self.pending
+            .lock()
+            .expect("approval registry lock poisoned")
+            .remove(&id);
     }
 }
 

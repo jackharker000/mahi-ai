@@ -37,7 +37,10 @@ struct StubTools {
 
 impl StubTools {
     fn empty() -> Self {
-        Self { descriptors: Vec::new(), invocations: AtomicUsize::new(0) }
+        Self {
+            descriptors: Vec::new(),
+            invocations: AtomicUsize::new(0),
+        }
     }
 
     fn with_echo(requires_approval: bool) -> Self {
@@ -75,7 +78,9 @@ impl ToolInvokeContract for StubTools {
     ) -> Result<ToolEventStream, ContractError> {
         self.invocations.fetch_add(1, Ordering::SeqCst);
         let events: Vec<Result<ToolEvent, ContractError>> = vec![
-            Ok(ToolEvent::Chunk { data: "working...".to_string() }),
+            Ok(ToolEvent::Chunk {
+                data: "working...".to_string(),
+            }),
             Ok(ToolEvent::Result {
                 output: serde_json::json!({ "echoed": call.args }),
                 truncated: false,
@@ -99,7 +104,10 @@ fn scripted_model() -> ModelDescriptor {
         id: "scripted-test".to_string(),
         display_name: "Scripted test model".to_string(),
         context_window: 4096,
-        capabilities: CapabilitySet { tool_calling: true, ..CapabilitySet::none() },
+        capabilities: CapabilitySet {
+            tool_calling: true,
+            ..CapabilitySet::none()
+        },
         limitations: Vec::new(),
         size_bytes: None,
         quantization: None,
@@ -169,13 +177,16 @@ fn engine_with(
     inference: Arc<dyn InferenceProvider>,
     tools: Arc<dyn ToolInvokeContract>,
 ) -> MahiEngine {
-    MahiEngine::new(EngineConfig { data, inference, tools, device_id: Uuid::new_v4() })
+    MahiEngine::new(EngineConfig {
+        data,
+        inference,
+        tools,
+        device_id: Uuid::new_v4(),
+    })
 }
 
 /// Drain a turn stream into a Vec of events, stopping after `TurnFinished`.
-async fn drain(
-    mut stream: mahi_agent_core::AgentEventStream,
-) -> Vec<AgentEvent> {
+async fn drain(mut stream: mahi_agent_core::AgentEventStream) -> Vec<AgentEvent> {
     let mut events = Vec::new();
     while let Some(item) = stream.next().await {
         let event = item.expect("turn stream yielded an error");
@@ -208,25 +219,42 @@ async fn run_turn_streams_text_and_persists_assistant_message() {
         Arc::new(MockInferenceProvider::default()),
         Arc::new(StubTools::empty()),
     );
-    let conversation_id = engine.create_conversation(ComputeMode::OnDevice).await.unwrap();
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
 
     let stream = engine
-        .run_turn(conversation_id, "hello there".to_string(), CancellationToken::new())
+        .run_turn(
+            conversation_id,
+            "hello there".to_string(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let events = drain(stream).await;
 
     // Lifecycle: starts with TurnStarted, ends with TurnFinished(Stop).
-    assert!(matches!(events.first(), Some(AgentEvent::TurnStarted { .. })));
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::TurnStarted { .. })
+    ));
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::TurnFinished { reason: FinishReason::Stop })
+        Some(AgentEvent::TurnFinished {
+            reason: FinishReason::Stop
+        })
     ));
 
     // Text actually streams (mock emits word-by-word, so several deltas).
-    let delta_count =
-        events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { .. })).count();
-    assert!(delta_count > 1, "expected streaming deltas, got {delta_count}");
+    let delta_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        .count();
+    assert!(
+        delta_count > 1,
+        "expected streaming deltas, got {delta_count}"
+    );
     assert_eq!(
         collected_text(&events),
         "Hello from Mahi. This is the on-device mock model."
@@ -251,29 +279,43 @@ async fn tool_call_round_trip_without_approval_completes_loop() {
     let provider = Arc::new(ToolThenTextProvider::default());
     let tools = Arc::new(StubTools::with_echo(false));
     let engine = engine_with(data.clone(), provider.clone(), tools.clone());
-    let conversation_id = engine.create_conversation(ComputeMode::OnDevice).await.unwrap();
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
 
     let stream = engine
-        .run_turn(conversation_id, "use the echo tool".to_string(), CancellationToken::new())
+        .run_turn(
+            conversation_id,
+            "use the echo tool".to_string(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let events = drain(stream).await;
 
     // No approval should have been requested.
-    assert!(!events.iter().any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
 
     // The tool ran exactly once and its events were forwarded.
     assert_eq!(tools.invocation_count(), 1);
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::Tool { event: ToolEvent::Result { .. } })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Tool {
+            event: ToolEvent::Result { .. }
+        }
+    )));
 
     // The loop went back to inference after the tool result.
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert_eq!(collected_text(&events), "The tool said hi.");
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::TurnFinished { reason: FinishReason::Stop })
+        Some(AgentEvent::TurnFinished {
+            reason: FinishReason::Stop
+        })
     ));
 
     // History: user → assistant(tool_call) → tool(result) → assistant(text).
@@ -281,7 +323,12 @@ async fn tool_call_round_trip_without_approval_completes_loop() {
     let roles: Vec<MessageRole> = history.iter().map(|m| m.role).collect();
     assert_eq!(
         roles,
-        vec![MessageRole::User, MessageRole::Assistant, MessageRole::Tool, MessageRole::Assistant]
+        vec![
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::Tool,
+            MessageRole::Assistant
+        ]
     );
     assert!(history[1]
         .content
@@ -309,12 +356,17 @@ async fn spawn_subagents_returns_one_summary_per_goal() {
         Arc::new(StubTools::empty()),
     );
 
-    let summaries =
-        engine.spawn_subagents(vec!["a".to_string(), "b".to_string()]).await.unwrap();
+    let summaries = engine
+        .spawn_subagents(vec!["a".to_string(), "b".to_string()])
+        .await
+        .unwrap();
 
     assert_eq!(summaries.len(), 2);
     for summary in &summaries {
-        assert_eq!(summary, "Hello from Mahi. This is the on-device mock model.");
+        assert_eq!(
+            summary,
+            "Hello from Mahi. This is the on-device mock model."
+        );
     }
 
     // Each subagent ran in its own fresh conversation.
@@ -328,10 +380,17 @@ async fn approval_gate_parks_turn_until_resolved() {
     let provider = Arc::new(ToolThenTextProvider::default());
     let tools = Arc::new(StubTools::with_echo(true));
     let engine = engine_with(data.clone(), provider, tools.clone());
-    let conversation_id = engine.create_conversation(ComputeMode::OnDevice).await.unwrap();
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
 
     let mut stream = engine
-        .run_turn(conversation_id, "do something risky".to_string(), CancellationToken::new())
+        .run_turn(
+            conversation_id,
+            "do something risky".to_string(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -340,7 +399,10 @@ async fn approval_gate_parks_turn_until_resolved() {
     let mut approval_id = None;
     while let Some(item) = stream.next().await {
         let event = item.unwrap();
-        if let AgentEvent::ApprovalRequired { approval_id: id, .. } = &event {
+        if let AgentEvent::ApprovalRequired {
+            approval_id: id, ..
+        } = &event
+        {
             approval_id = Some(*id);
             events.push(event);
             break;
@@ -366,12 +428,17 @@ async fn approval_gate_parks_turn_until_resolved() {
     }
 
     assert_eq!(tools.invocation_count(), 1);
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::Tool { event: ToolEvent::Result { .. } })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Tool {
+            event: ToolEvent::Result { .. }
+        }
+    )));
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::TurnFinished { reason: FinishReason::Stop })
+        Some(AgentEvent::TurnFinished {
+            reason: FinishReason::Stop
+        })
     ));
 
     // The audit trail records the allowed, approval-gated call.
@@ -389,21 +456,34 @@ async fn denied_approval_skips_tool_and_feeds_denial_back() {
     let provider = Arc::new(ToolThenTextProvider::default());
     let tools = Arc::new(StubTools::with_echo(true));
     let engine = engine_with(data.clone(), provider, tools.clone());
-    let conversation_id = engine.create_conversation(ComputeMode::OnDevice).await.unwrap();
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
 
     let mut stream = engine
-        .run_turn(conversation_id, "do something risky".to_string(), CancellationToken::new())
+        .run_turn(
+            conversation_id,
+            "do something risky".to_string(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     let mut approval_id = None;
     while let Some(item) = stream.next().await {
-        if let AgentEvent::ApprovalRequired { approval_id: id, .. } = item.unwrap() {
+        if let AgentEvent::ApprovalRequired {
+            approval_id: id, ..
+        } = item.unwrap()
+        {
             approval_id = Some(id);
             break;
         }
     }
-    engine.resolve_approval(approval_id.unwrap(), false).await.unwrap();
+    engine
+        .resolve_approval(approval_id.unwrap(), false)
+        .await
+        .unwrap();
 
     // Drain to the end: the tool never runs, the loop still completes.
     let mut finished_stop = false;
@@ -444,7 +524,10 @@ async fn cancellation_finishes_turn_with_cancelled() {
         ) -> Result<InferenceStream, ContractError> {
             let s = futures::stream::unfold(0u64, |n| async move {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                Some((Ok(InferenceChunk::text("tick ", ComputeMode::OnDevice)), n + 1))
+                Some((
+                    Ok(InferenceChunk::text("tick ", ComputeMode::OnDevice)),
+                    n + 1,
+                ))
             });
             Ok(Box::pin(s))
         }
@@ -455,7 +538,10 @@ async fn cancellation_finishes_turn_with_cancelled() {
         Arc::new(SlowProvider),
         Arc::new(StubTools::empty()),
     );
-    let conversation_id = engine.create_conversation(ComputeMode::OnDevice).await.unwrap();
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
 
     let cancel = CancellationToken::new();
     let mut stream = engine

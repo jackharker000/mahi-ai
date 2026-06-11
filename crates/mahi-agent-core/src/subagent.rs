@@ -57,7 +57,9 @@ async fn run_one_subagent(
     mode: ComputeMode,
 ) -> Result<String, ContractError> {
     let conversation_id = engine.create_conversation(mode).await?;
-    let mut events = engine.run_turn(conversation_id, goal, CancellationToken::new()).await?;
+    let mut events = engine
+        .run_turn(conversation_id, goal, CancellationToken::new())
+        .await?;
 
     // Drain the stream; keep the streamed text as a fallback summary.
     let mut streamed_text = String::new();

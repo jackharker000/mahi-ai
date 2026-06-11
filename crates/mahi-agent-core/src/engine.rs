@@ -93,13 +93,20 @@ impl MahiEngine {
     }
 
     /// List the most recently updated conversations.
-    pub async fn list_conversations(&self, limit: usize) -> Result<Vec<Conversation>, ContractError> {
+    pub async fn list_conversations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Conversation>, ContractError> {
         self.inner.data.conversations.list(limit).await
     }
 
     /// Full ordered message history of a conversation.
     pub async fn history(&self, conversation_id: Uuid) -> Result<Vec<Message>, ContractError> {
-        self.inner.data.messages.range(conversation_id, usize::MAX).await
+        self.inner
+            .data
+            .messages
+            .range(conversation_id, usize::MAX)
+            .await
     }
 
     /// Run one agent turn. Streams text/tool/approval/lifecycle events.
@@ -116,14 +123,26 @@ impl MahiEngine {
             .conversations
             .get(conversation_id)
             .await?
-            .ok_or(ContractError::Store(StoreError::NotFound { id: conversation_id }))?;
+            .ok_or(ContractError::Store(StoreError::NotFound {
+                id: conversation_id,
+            }))?;
         let mode = conversation.mode_at_creation;
 
         // Step 1: persist the user message before the loop starts, so a turn
         // that fails to even begin still records what the user said.
-        let sequence = self.inner.data.messages.next_sequence(conversation_id).await?;
-        let user_message =
-            Message::text(conversation_id, MessageRole::User, user_text.clone(), mode, sequence);
+        let sequence = self
+            .inner
+            .data
+            .messages
+            .next_sequence(conversation_id)
+            .await?;
+        let user_message = Message::text(
+            conversation_id,
+            MessageRole::User,
+            user_text.clone(),
+            mode,
+            sequence,
+        );
         let user_message_id = user_message.id;
         self.inner.data.messages.append(user_message).await?;
 
@@ -144,7 +163,11 @@ impl MahiEngine {
     }
 
     /// Respond to a pending approval (id from `AgentEvent::ApprovalRequired`).
-    pub async fn resolve_approval(&self, approval_id: Uuid, approved: bool) -> Result<(), ContractError> {
+    pub async fn resolve_approval(
+        &self,
+        approval_id: Uuid,
+        approved: bool,
+    ) -> Result<(), ContractError> {
         self.inner.approvals.resolve(approval_id, approved)
     }
 
@@ -216,7 +239,10 @@ impl TurnRunner {
         let reason = match self.drive().await {
             Ok(reason) => reason,
             Err(e) => {
-                self.emit(AgentEvent::Error { message: e.to_string() }).await;
+                self.emit(AgentEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
                 FinishReason::Error
             }
         };
@@ -242,7 +268,11 @@ impl TurnRunner {
             let request = self.build_request(messages, &descriptors);
 
             // Step 3: stream generation.
-            let stream = self.inner.inference.generate(request, self.cancel.clone()).await?;
+            let stream = self
+                .inner
+                .inference
+                .generate(request, self.cancel.clone())
+                .await?;
             let mut segment_text = String::new();
             match self.consume_inference(stream, &mut segment_text).await? {
                 RoundOutcome::Cancelled => {
@@ -257,13 +287,17 @@ impl TurnRunner {
                 RoundOutcome::ToolCalls(calls) => {
                     // Step 4: record the assistant tool-call message, then run
                     // each call (gated by approval where required) and loop.
-                    let assistant_message_id =
-                        self.persist_assistant_tool_calls(&segment_text, &calls).await?;
+                    let assistant_message_id = self
+                        .persist_assistant_tool_calls(&segment_text, &calls)
+                        .await?;
                     for call in calls {
                         if self.cancel.is_cancelled() {
                             return Ok(FinishReason::Cancelled);
                         }
-                        match self.execute_tool_call(assistant_message_id, &descriptors, call).await? {
+                        match self
+                            .execute_tool_call(assistant_message_id, &descriptors, call)
+                            .await?
+                        {
                             ToolStepOutcome::Completed => {}
                             ToolStepOutcome::Cancelled => return Ok(FinishReason::Cancelled),
                         }
@@ -279,7 +313,11 @@ impl TurnRunner {
         Ok(FinishReason::Error)
     }
 
-    fn build_request(&self, messages: Vec<Message>, descriptors: &[ToolDescriptor]) -> InferenceRequest {
+    fn build_request(
+        &self,
+        messages: Vec<Message>,
+        descriptors: &[ToolDescriptor],
+    ) -> InferenceRequest {
         let specs: Vec<ToolSpec> = descriptors
             .iter()
             .map(|d| ToolSpec {
@@ -324,7 +362,11 @@ impl TurnRunner {
             let chunk = chunk?;
 
             if chunk.active_mode != self.mode {
-                self.emit(AgentEvent::ModeHandoff { from: self.mode, to: chunk.active_mode }).await;
+                self.emit(AgentEvent::ModeHandoff {
+                    from: self.mode,
+                    to: chunk.active_mode,
+                })
+                .await;
                 self.mode = chunk.active_mode;
             }
 
@@ -371,8 +413,12 @@ impl TurnRunner {
 
         let Some(descriptor) = descriptors.iter().find(|d| d.id == call.tool_id) else {
             let message = format!("model requested unknown tool '{}'", call.tool_id);
-            self.emit(AgentEvent::Error { message: message.clone() }).await;
-            self.audit_tool_call(&call, &args, AuditOutcome::Denied, None).await?;
+            self.emit(AgentEvent::Error {
+                message: message.clone(),
+            })
+            .await;
+            self.audit_tool_call(&call, &args, AuditOutcome::Denied, None)
+                .await?;
             self.append_tool_result(&call.call_id, serde_json::json!({ "error": message }), None)
                 .await?;
             return Ok(ToolStepOutcome::Completed);
@@ -389,7 +435,11 @@ impl TurnRunner {
                 descriptor.id,
                 truncate_for_summary(&call.args_raw, 200),
             );
-            self.emit(AgentEvent::ApprovalRequired { approval_id, summary }).await;
+            self.emit(AgentEvent::ApprovalRequired {
+                approval_id,
+                summary,
+            })
+            .await;
 
             let approved = tokio::select! {
                 biased;
@@ -401,7 +451,8 @@ impl TurnRunner {
             };
 
             if !approved {
-                self.audit_tool_call(&call, &args, AuditOutcome::Denied, approval_ref).await?;
+                self.audit_tool_call(&call, &args, AuditOutcome::Denied, approval_ref)
+                    .await?;
                 self.append_tool_result(
                     &call.call_id,
                     serde_json::json!({ "denied": true, "message": "the user denied this action" }),
@@ -427,7 +478,12 @@ impl TurnRunner {
         };
 
         let mut output = serde_json::Value::Null;
-        match self.inner.tools.invoke(invocation, self.cancel.clone()).await {
+        match self
+            .inner
+            .tools
+            .invoke(invocation, self.cancel.clone())
+            .await
+        {
             Ok(mut events) => loop {
                 let next = tokio::select! {
                     biased;
@@ -454,19 +510,27 @@ impl TurnRunner {
                         // Tool failures are non-fatal: feed the error back to
                         // the model so it can recover or explain.
                         output = serde_json::json!({ "error": e.to_string() });
-                        self.emit(AgentEvent::Error { message: e.to_string() }).await;
+                        self.emit(AgentEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
                         break;
                     }
                 }
             },
             Err(e) => {
                 output = serde_json::json!({ "error": e.to_string() });
-                self.emit(AgentEvent::Error { message: e.to_string() }).await;
+                self.emit(AgentEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
             }
         }
 
-        self.audit_tool_call(&call, &args, AuditOutcome::Allowed, approval_ref).await?;
-        self.append_tool_result(&call.call_id, output, approval_ref).await?;
+        self.audit_tool_call(&call, &args, AuditOutcome::Allowed, approval_ref)
+            .await?;
+        self.append_tool_result(&call.call_id, output, approval_ref)
+            .await?;
         Ok(ToolStepOutcome::Completed)
     }
 
@@ -475,9 +539,19 @@ impl TurnRunner {
         if text.is_empty() {
             return Ok(());
         }
-        let sequence = self.inner.data.messages.next_sequence(self.conversation.id).await?;
-        let mut message =
-            Message::text(self.conversation.id, MessageRole::Assistant, text, self.mode, sequence);
+        let sequence = self
+            .inner
+            .data
+            .messages
+            .next_sequence(self.conversation.id)
+            .await?;
+        let mut message = Message::text(
+            self.conversation.id,
+            MessageRole::Assistant,
+            text,
+            self.mode,
+            sequence,
+        );
         message.model_id = Some(self.inner.inference.descriptor().id);
         self.inner.data.messages.append(message).await
     }
@@ -489,10 +563,17 @@ impl TurnRunner {
         text: &str,
         calls: &[PendingToolCall],
     ) -> Result<Uuid, ContractError> {
-        let sequence = self.inner.data.messages.next_sequence(self.conversation.id).await?;
+        let sequence = self
+            .inner
+            .data
+            .messages
+            .next_sequence(self.conversation.id)
+            .await?;
         let mut content: Vec<ContentBlock> = Vec::new();
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text: text.to_string() });
+            content.push(ContentBlock::Text {
+                text: text.to_string(),
+            });
         }
         for call in calls {
             content.push(ContentBlock::ToolCall {
@@ -524,12 +605,20 @@ impl TurnRunner {
         output: serde_json::Value,
         approval_ref: Option<Uuid>,
     ) -> Result<(), ContractError> {
-        let sequence = self.inner.data.messages.next_sequence(self.conversation.id).await?;
+        let sequence = self
+            .inner
+            .data
+            .messages
+            .next_sequence(self.conversation.id)
+            .await?;
         let message = Message {
             id: Uuid::new_v4(),
             conversation_id: self.conversation.id,
             role: MessageRole::Tool,
-            content: vec![ContentBlock::ToolResult { call_id: call_id.to_string(), output }],
+            content: vec![ContentBlock::ToolResult {
+                call_id: call_id.to_string(),
+                output,
+            }],
             model_id: None,
             mode: self.mode,
             created_at: chrono::Utc::now(),

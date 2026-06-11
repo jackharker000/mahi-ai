@@ -32,10 +32,16 @@ pub(crate) async fn assemble_context(
         .semantic_search(recall_query, conversation.space_id, memory_limit)
         .await?;
     if !memories.is_empty() {
-        let lines: Vec<String> = memories.iter().map(|m| format!("- {}", m.content)).collect();
+        let lines: Vec<String> = memories
+            .iter()
+            .map(|m| format!("- {}", m.content))
+            .collect();
         preamble.push(synthetic_system(
             conversation,
-            format!("Relevant memories recalled for this turn:\n{}", lines.join("\n")),
+            format!(
+                "Relevant memories recalled for this turn:\n{}",
+                lines.join("\n")
+            ),
         ));
     }
 
@@ -46,7 +52,13 @@ pub(crate) async fn assemble_context(
 /// A synthetic (never persisted) system message; `sequence_num` is -1 to mark
 /// it as out-of-band.
 fn synthetic_system(conversation: &Conversation, text: String) -> Message {
-    Message::text(conversation.id, MessageRole::System, text, conversation.mode_at_creation, -1)
+    Message::text(
+        conversation.id,
+        MessageRole::System,
+        text,
+        conversation.mode_at_creation,
+        -1,
+    )
 }
 
 /// Sliding-window compaction: always keep the preamble and the most recent
@@ -76,7 +88,9 @@ pub(crate) fn compact(
 
 /// Approximate cost of a message: length of its serialized content blocks.
 fn message_cost(msg: &Message) -> usize {
-    serde_json::to_string(&msg.content).map(|s| s.len()).unwrap_or(0)
+    serde_json::to_string(&msg.content)
+        .map(|s| s.len())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -92,8 +106,9 @@ mod tests {
     #[test]
     fn compact_keeps_most_recent_within_budget() {
         let conv = Uuid::new_v4();
-        let history: Vec<Message> =
-            (0..10).map(|i| msg(conv, i, &format!("message number {i} {}", "x".repeat(100)))).collect();
+        let history: Vec<Message> = (0..10)
+            .map(|i| msg(conv, i, &format!("message number {i} {}", "x".repeat(100))))
+            .collect();
         let compacted = compact(Vec::new(), history, 400);
         assert!(!compacted.is_empty());
         assert!(compacted.len() < 10, "should have dropped old messages");
