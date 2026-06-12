@@ -2,23 +2,24 @@ name: macOS app
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-app:
-    name: build Mahi.app (unsigned)
+    name: build Mahi.app + DMG (unsigned)
     runs-on: macos-14
-    # This job is advisory: the app build needs Apple code-signing to produce a
-    # runnable artifact, and forks / fresh clones won't have signing configured.
-    # We build with signing disabled (CODE_SIGNING_ALLOWED=NO below) so the job
-    # normally succeeds, but `continue-on-error` keeps a missing-signing or
-    # Xcode-version hiccup from blocking Rust-only PRs. Treat a red run here as
-    # a warning, not a merge blocker.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -42,17 +43,57 @@ jobs:
         working-directory: macos
         run: |
           xcodegen generate
-          # XcodeGen 2.45 stamps the Xcode-16 project format (objectVersion 77);
-          # rewrite it to 56 so the runner's Xcode 15.4 can open the project.
+          # XcodeGen 2.45 stamps the Xcode-16 project format (77); rewrite it to 56
+          # so the runner's Xcode 15.4 can open the project.
           sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' Mahi.xcodeproj/project.pbxproj
 
-      - name: Build Mahi scheme (signing disabled)
+      - name: Build Mahi.app (Release, unsigned)
         working-directory: macos
         run: |
+          set -euo pipefail
           xcodebuild build \
             -project Mahi.xcodeproj \
             -scheme Mahi \
+            -configuration Release \
+            -derivedDataPath build \
             -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+          test -d build/Build/Products/Release/Mahi.app
+
+      - name: Package Mahi.dmg
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release/Mahi.app"
+          # Ad-hoc sign so the app launches without a "damaged" error (still not notarized).
+          codesign --force --deep --sign - "$APP" || true
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/Mahi.app"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f Mahi.dmg
+          hdiutil create -volname "Mahi" -srcfolder "$STAGE" -ov -format UDZO Mahi.dmg
+          ls -lh Mahi.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mahi-macos-dmg
+          path: macos/Mahi.dmg
+          if-no-files-found: error
+
+      - name: Publish DMG to the rolling preview release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-preview
+          name: Mahi macOS (preview build)
+          prerelease: true
+          files: macos/Mahi.dmg
+          body: |
+            Unsigned preview build of the Mahi macOS app.
+
+            **Install:** download `Mahi.dmg`, open it, and drag **Mahi** into **Applications**.
+            On first launch, right-click the app and choose **Open** (it is not notarized,
+            so a normal double-click is blocked by Gatekeeper the first time).
