@@ -84,4 +84,18 @@ public protocol MahiEngineProtocol: AnyObject, Sendable {
 
     /// Respond to a pending approval (id from `AgentEvent.approvalRequired`).
     func resolveApproval(approvalID: UUID, approved: Bool) async throws
+
+    // Local model management (Ollama-style, app-managed llama runtime)
+    func modelCatalog() async throws -> [CatalogModel]
+    func startDownload(modelID: String) async throws
+    func cancelDownload(modelID: String) async throws
+    func deleteModel(modelID: String) async throws
+    func activateModel(modelID: String) async throws
+    func runtimeStatus() async throws -> RuntimeStatus
+
+    // Hosted (cloud) provider configuration; nil clears it.
+    func setHostedConfig(_ config: HostedConfig?) async throws
+
+    // Parallel subagents: returns one short result summary per goal.
+    func spawnSubagents(goals: [String]) async throws -> [String]
 }

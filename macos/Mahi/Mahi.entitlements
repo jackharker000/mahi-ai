@@ -2,12 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Phase 0: sandboxed with the access the assistant needs. Computer-use
-         (screen capture + synthetic input across apps) requires either dropping
-         the sandbox or additional TCC grants and is gated behind explicit
-         approval; see docs/backend/domains/04-connectivity-takeover.md. -->
+    <!-- Computer use is real now: global screen capture (CGWindowList),
+         Accessibility reads of other apps, and synthetic CGEvent input cannot
+         work inside the App Sandbox, so it is disabled for the direct-download
+         (DMG) build. This forfeits Mac App Store distribution; see
+         docs/backend/domains/04-connectivity-takeover.md. Safety still holds:
+         macOS TCC gates Screen Recording + Accessibility per-user, and the
+         in-app supervisor (pause/kill) + sensitive-screen guard gate every
+         action. -->
     <key>com.apple.security.app-sandbox</key>
-    <true/>
+    <false/>
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>

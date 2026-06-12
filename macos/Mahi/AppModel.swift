@@ -4,7 +4,8 @@ import SwiftUI
 
 /// The app-facing view model. Owns the engine seam and drives one chat
 /// conversation: loading history, sending turns, streaming assistant output,
-/// and surfacing approval prompts.
+/// and surfacing approval prompts. Also fronts the local-model manager
+/// (catalog, downloads, runtime), hosted-provider config, and subagent runs.
 @MainActor
 public final class AppModel: ObservableObject {
     @Published public private(set) var conversations: [Conversation] = []
@@ -17,6 +18,17 @@ public final class AppModel: ObservableObject {
     @Published public var pendingApproval: PendingApproval?
     @Published public var errorText: String?
 
+    // Local model manager
+    @Published public private(set) var models: [CatalogModel] = []
+    @Published public private(set) var runtime: RuntimeStatus = .noModel
+
+    // Tool activity within the current streaming turn
+    @Published public private(set) var activeTool: ActiveTool?
+
+    // Subagents
+    @Published public private(set) var agentResults: [String] = []
+    @Published public private(set) var isRunningAgents = false
+
     /// A gated action awaiting the user's decision.
     public struct PendingApproval: Identifiable {
         public let id: UUID
@@ -24,8 +36,16 @@ public final class AppModel: ObservableObject {
         public let preview: ApprovalPreview
     }
 
+    /// The tool currently running inside the streaming turn (drives the
+    /// spinner bubble in `ChatView`).
+    public struct ActiveTool: Equatable {
+        public let name: String
+        public let detail: String
+    }
+
     private let engine: any MahiEngineProtocol
     private var turnTask: Task<Void, Never>?
+    private var modelPollTask: Task<Void, Never>?
 
     public init(engine: any MahiEngineProtocol = EngineFactory.makeDefault()) {
         self.engine = engine
@@ -38,6 +58,7 @@ public final class AppModel: ObservableObject {
         } else {
             await newConversation()
         }
+        await refreshModels()
     }
 
     public func reloadConversations() async {
@@ -97,6 +118,138 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Local model manager
+
+    /// Fetch the catalog + runtime status and keep polling while anything is
+    /// downloading or the runtime is spinning up.
+    public func refreshModels() async {
+        await refreshModelStateOnce()
+        startModelPollingIfNeeded()
+    }
+
+    public func download(modelID: String) async {
+        do { try await engine.startDownload(modelID: modelID) } catch {
+            errorText = error.localizedDescription
+        }
+        await refreshModels()
+    }
+
+    public func cancelDownload(modelID: String) async {
+        do { try await engine.cancelDownload(modelID: modelID) } catch {
+            errorText = error.localizedDescription
+        }
+        await refreshModels()
+    }
+
+    public func delete(modelID: String) async {
+        do { try await engine.deleteModel(modelID: modelID) } catch {
+            errorText = error.localizedDescription
+        }
+        await refreshModels()
+    }
+
+    public func activate(modelID: String) async {
+        do { try await engine.activateModel(modelID: modelID) } catch {
+            errorText = error.localizedDescription
+        }
+        await refreshModels()
+    }
+
+    /// User-facing display name for a catalog id, when known.
+    public func displayName(forModelID id: String) -> String? {
+        models.first { $0.id == id }?.displayName
+    }
+
+    /// One-line runtime summary for headers and toolbar badges.
+    public var runtimeHeadline: String {
+        switch runtime {
+        case .noModel:
+            return "No model loaded"
+        case .preparingRuntime:
+            return "Preparing runtime…"
+        case .starting(let id):
+            return "Starting \(displayName(forModelID: id) ?? id)…"
+        case .running(let id):
+            return "Running \(displayName(forModelID: id) ?? id)"
+        case .failed(let message):
+            return "Runtime failed: \(message)"
+        }
+    }
+
+    private var needsModelPolling: Bool {
+        if runtime.isTransitioning { return true }
+        return models.contains { model in
+            if case .downloading = model.state { return true }
+            return false
+        }
+    }
+
+    private func refreshModelStateOnce() async {
+        do {
+            models = try await engine.modelCatalog()
+            runtime = try await engine.runtimeStatus()
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    private func startModelPollingIfNeeded() {
+        guard modelPollTask == nil, needsModelPolling else { return }
+        modelPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let self, !Task.isCancelled else { return }
+                await self.refreshModelStateOnce()
+                if !self.needsModelPolling { break }
+            }
+            self?.modelPollTask = nil
+        }
+    }
+
+    // MARK: - Hosted provider
+
+    /// Persist the hosted (cloud) provider config into the engine.
+    /// An empty API key clears the config.
+    public func saveHostedConfig(
+        provider: HostedProvider,
+        apiKey: String,
+        model: String,
+        baseURL: String?
+    ) async {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = baseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config: HostedConfig? = key.isEmpty ? nil : HostedConfig(
+            provider: provider,
+            apiKey: key,
+            model: modelID,
+            baseURL: (base?.isEmpty ?? true) ? nil : base
+        )
+        do { try await engine.setHostedConfig(config) } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    // MARK: - Subagents
+
+    /// Run one subagent per non-empty goal and publish their summaries.
+    public func runAgents(goals: [String]) async {
+        let cleaned = goals
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty, !isRunningAgents else { return }
+        isRunningAgents = true
+        agentResults = []
+        do {
+            agentResults = try await engine.spawnSubagents(goals: cleaned)
+        } catch {
+            errorText = error.localizedDescription
+        }
+        isRunningAgents = false
+    }
+
+    // MARK: - Turn streaming
+
     private func runTurn(convID: UUID, text: String) async {
         do {
             let handle = try await engine.runTurn(conversationID: convID, userText: text)
@@ -115,8 +268,9 @@ public final class AppModel: ObservableObject {
                         preview: ApprovalPreview.parse(summary: summary)
                     )
                 case .tool(let toolEvent):
-                    appendToolNote(toolEvent, convID: convID)
+                    handleToolEvent(toolEvent, convID: convID)
                 case .turnFinished:
+                    activeTool = nil
                     flushAssistant(convID: convID)
                 case .error(let message):
                     errorText = message
@@ -128,6 +282,7 @@ public final class AppModel: ObservableObject {
             errorText = error.localizedDescription
         }
         flushAssistant(convID: convID)
+        activeTool = nil
         isStreaming = false
         await reloadConversations()
     }
@@ -146,15 +301,43 @@ public final class AppModel: ObservableObject {
         streamingText = ""
     }
 
-    private func appendToolNote(_ event: ToolEvent, convID: UUID) {
-        let note: String?
+    private func handleToolEvent(_ event: ToolEvent, convID: UUID) {
         switch event {
-        case .result(let outputJSON, _): note = "tool result: \(outputJSON)"
-        case .error(let message, _): note = "tool error: \(message)"
-        case .citation(let citation): note = "source: \(citation.url)"
-        default: note = nil
+        case .chunk(let data):
+            // Chunks look like "web.search: querying…" — split into name + detail.
+            activeTool = Self.parseTool(chunk: data)
+        case .citation(let citation):
+            appendToolNote("\(activeTool?.name ?? "web") source: \(citation.url)", convID: convID)
+        case .result(let outputJSON, _):
+            appendToolNote("\(activeTool?.name ?? "tool") result: \(outputJSON)", convID: convID)
+            activeTool = nil
+        case .error(let message, _):
+            appendToolNote("\(activeTool?.name ?? "tool") error: \(message)", convID: convID)
+            activeTool = nil
+        case .approvalRequired(let approvalID, let summary, _):
+            // Tool-level gate: surface through the same approval sheet.
+            pendingApproval = PendingApproval(
+                id: approvalID,
+                summary: summary,
+                preview: ApprovalPreview.parse(summary: summary)
+            )
+        case .cancelled:
+            activeTool = nil
         }
-        guard let note else { return }
+    }
+
+    private static func parseTool(chunk: String) -> ActiveTool {
+        let pieces = chunk.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else {
+            return ActiveTool(name: chunk, detail: "")
+        }
+        return ActiveTool(
+            name: pieces[0].trimmingCharacters(in: .whitespaces),
+            detail: pieces[1].trimmingCharacters(in: .whitespaces)
+        )
+    }
+
+    private func appendToolNote(_ note: String, convID: UUID) {
         messages.append(
             Message(
                 conversationID: convID,

@@ -2,7 +2,9 @@ import AppKit
 import MahiKit
 import SwiftUI
 
-/// The chat transcript + composer, with the active-compute-mode badge.
+/// The chat transcript + composer, with a toolbar badge showing what is
+/// actually serving this chat (the local runtime's model when one is running,
+/// otherwise the active compute mode).
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     private let streamingAnchor = "streaming-bubble"
@@ -16,8 +18,26 @@ struct ChatView: View {
         .navigationTitle("Chat")
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                ModeBadge(mode: model.activeMode)
+                backendBadge
             }
+        }
+    }
+
+    /// "Local · Qwen2.5 7B" while the managed runtime serves a model;
+    /// the compute-mode pill otherwise.
+    @ViewBuilder private var backendBadge: some View {
+        if case .running(let modelID) = model.runtime {
+            BadgePill(
+                text: "Local · \(model.displayName(forModelID: modelID) ?? modelID)",
+                systemImage: "cpu",
+                help: "Served by the managed local runtime."
+            )
+        } else {
+            BadgePill(
+                text: model.activeMode.displayName,
+                systemImage: model.activeMode.symbolName,
+                help: model.activeMode.explanation
+            )
         }
     }
 
@@ -26,10 +46,13 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(model.messages) { message in
-                        MessageBubble(role: message.role, text: message.textContent)
+                        bubble(for: message)
                             .id(message.id)
                     }
                     if model.isStreaming {
+                        if let tool = model.activeTool {
+                            ToolBubble(name: tool.name, detail: tool.detail, isRunning: true)
+                        }
                         MessageBubble(
                             role: .assistant,
                             text: model.streamingText.isEmpty ? "…" : model.streamingText
@@ -46,6 +69,23 @@ struct ChatView: View {
                 proxy.scrollTo(streamingAnchor, anchor: .bottom)
             }
         }
+    }
+
+    @ViewBuilder private func bubble(for message: Message) -> some View {
+        if message.role == .tool {
+            let (name, detail) = Self.splitToolNote(message.textContent)
+            ToolBubble(name: name, detail: detail, isRunning: false)
+        } else {
+            MessageBubble(role: message.role, text: message.textContent)
+        }
+    }
+
+    /// Persisted tool notes look like "web.search result: {…}" — show the first
+    /// word as the tool name and the rest as the detail line.
+    static func splitToolNote(_ text: String) -> (name: String, detail: String) {
+        let pieces = text.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return (text, "") }
+        return (String(pieces[0]), String(pieces[1]))
     }
 
     private var composer: some View {
@@ -117,17 +157,58 @@ private struct MessageBubble: View {
     }
 }
 
-/// The active-compute-mode pill shown in the toolbar.
-private struct ModeBadge: View {
-    let mode: ComputeMode
+/// A compact "Tool" bubble: wrench icon, tool name, detail line, and a subtle
+/// spinner while the tool is still running.
+private struct ToolBubble: View {
+    let name: String
+    let detail: String
+    let isRunning: Bool
 
     var body: some View {
-        Label(mode.displayName, systemImage: mode.symbolName)
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("Tool").font(.caption2).foregroundStyle(.secondary)
+                        Text(name)
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    }
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                    }
+                }
+                if isRunning {
+                    ProgressView().controlSize(.mini)
+                }
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Spacer(minLength: 48)
+        }
+    }
+}
+
+/// A small capsule badge for the toolbar.
+private struct BadgePill: View {
+    let text: String
+    let systemImage: String
+    let help: String
+
+    var body: some View {
+        Label(text, systemImage: systemImage)
             .font(.caption)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Color.secondary.opacity(0.12))
             .clipShape(Capsule())
-            .help(mode.explanation)
+            .help(help)
     }
 }
