@@ -9,6 +9,8 @@ options:
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
+  # Xcode 15.4 (the CI runner) can't read XcodeGen's default Xcode-16 format (77).
+  objectVersion: 56
 
 packages:
   MahiKit:
