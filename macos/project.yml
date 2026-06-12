@@ -1,0 +1,38 @@
+# XcodeGen spec for the Mahi macOS app.
+#   brew install xcodegen && (cd macos && xcodegen generate) && open macos/Mahi.xcodeproj
+#
+# Run macos/scripts/build-xcframework.sh first to link the real Rust core;
+# without it the app builds and runs on the in-process PreviewMock engine.
+name: Mahi
+options:
+  bundleIdPrefix: ai.mahi
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  MahiKit:
+    path: MahiKit
+
+targets:
+  Mahi:
+    type: application
+    platform: macOS
+    sources:
+      - path: Mahi
+    dependencies:
+      - package: MahiKit
+        product: MahiKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.mahi.app
+        PRODUCT_NAME: Mahi
+        INFOPLIST_FILE: Mahi/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Mahi/Mahi.entitlements
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: "NO"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.10"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        COMBINE_HIDPI_IMAGES: "YES"

@@ -10,8 +10,14 @@
 // `cancel`, `ComputerController`, `AgentEventFfi`) are normative per
 // docs/backend/phase-0/03-engine-facade.md. This file is the single place to adjust
 // if the generated spellings drift.
+//
+// NOTE: the shipped `mahi-ffi` exposes a *buffered* facade (`MahiEngineHandle`); this
+// adapter targets the richer *streaming* FFI (TurnHandle/pollBatch + computer-use
+// callback injection) which is the next FFI iteration. It is guarded on a module that
+// does not exist yet, so it stays dormant and the app always builds on
+// `PreviewMockEngine`.
 
-#if canImport(Mahi)
+#if canImport(MahiStreamingFFI)
 
 import Foundation
 import Mahi
