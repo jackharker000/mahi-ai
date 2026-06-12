@@ -1,0 +1,7 @@
+# Pin the toolchain so local builds and CI lint/format identically.
+# (CI's `dtolnay/rust-toolchain@stable` step still runs, but rustup honors this
+# override for all cargo/clippy/rustfmt invocations in the repo.)
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

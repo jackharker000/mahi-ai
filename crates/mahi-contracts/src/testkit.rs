@@ -155,7 +155,7 @@ impl ConversationStore for MemBackend {
             .values()
             .cloned()
             .collect();
-        v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        v.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
         v.truncate(limit);
         Ok(v)
     }
