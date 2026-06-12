@@ -39,10 +39,10 @@ struct ChatView: View {
                 }
                 .padding()
             }
-            .onChange(of: model.messages.count) { _, _ in
+            .onChange(of: model.messages.count) { _ in
                 withAnimation { proxy.scrollTo(model.messages.last?.id, anchor: .bottom) }
             }
-            .onChange(of: model.streamingText) { _, _ in
+            .onChange(of: model.streamingText) { _ in
                 proxy.scrollTo(streamingAnchor, anchor: .bottom)
             }
         }

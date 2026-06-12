@@ -17,7 +17,7 @@
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>13.0</string>
     <key>NSHumanReadableCopyright</key>
     <string>Mahi AI</string>
     <key>NSScreenCaptureUsageDescription</key>

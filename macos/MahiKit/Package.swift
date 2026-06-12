@@ -52,7 +52,7 @@ if ffiAvailable {
 
 let package = Package(
     name: "MahiKit",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v13)],
     products: [
         .library(name: "MahiKit", targets: ["MahiKit"])
     ],

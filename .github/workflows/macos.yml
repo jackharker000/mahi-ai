@@ -47,7 +47,7 @@ jobs:
           # so the runner's Xcode 15.4 can open the project.
           sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' Mahi.xcodeproj/project.pbxproj
 
-      - name: Build Mahi.app (Release, unsigned)
+      - name: Build Mahi.app (Release, unsigned, universal)
         working-directory: macos
         run: |
           set -euo pipefail
@@ -56,11 +56,19 @@ jobs:
             -scheme Mahi \
             -configuration Release \
             -derivedDataPath build \
-            -destination 'platform=macOS' \
+            -destination 'generic/platform=macOS' \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
-          test -d build/Build/Products/Release/Mahi.app
+          APP="build/Build/Products/Release/Mahi.app"
+          test -d "$APP"
+          echo "== architectures in the app binary =="
+          lipo -archs "$APP/Contents/MacOS/Mahi"
+          # Hard requirement: Apple Silicon AND Intel slices both present.
+          lipo -archs "$APP/Contents/MacOS/Mahi" | grep -q arm64
+          lipo -archs "$APP/Contents/MacOS/Mahi" | grep -q x86_64
 
       - name: Package Mahi.dmg
         working-directory: macos
@@ -93,6 +101,9 @@ jobs:
           files: macos/Mahi.dmg
           body: |
             Unsigned preview build of the Mahi macOS app.
+
+            **Requirements:** macOS 13 (Ventura) or newer — Apple Silicon **and** Intel Macs
+            (universal binary).
 
             **Install:** download `Mahi.dmg`, open it, and drag **Mahi** into **Applications**.
             On first launch, right-click the app and choose **Open** (it is not notarized,
