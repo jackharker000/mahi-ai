@@ -12,6 +12,7 @@
 
 import Foundation
 import Mahi
+import os
 
 /// `MahiEngineProtocol` backed by the real Rust core via the buffered FFI.
 public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
@@ -96,8 +97,7 @@ private final class BufferedTurnHandle: TurnHandleProtocol, @unchecked Sendable 
     private let handle: MahiEngineHandle
     private let conversationID: UUID
     private let userText: String
-    private let delivered = NSLock()
-    private var finished = false
+    private let finished = OSAllocatedUnfairLock(initialState: false)
 
     init(handle: MahiEngineHandle, conversationID: UUID, userText: String) {
         self.handle = handle
@@ -106,10 +106,11 @@ private final class BufferedTurnHandle: TurnHandleProtocol, @unchecked Sendable 
     }
 
     func pollBatch(maxEvents: UInt32) async throws -> [AgentEvent] {
-        delivered.lock()
-        let alreadyDone = finished
-        finished = true
-        delivered.unlock()
+        let alreadyDone = finished.withLock { done -> Bool in
+            let was = done
+            done = true
+            return was
+        }
         if alreadyDone { return [] }
 
         let handle = self.handle

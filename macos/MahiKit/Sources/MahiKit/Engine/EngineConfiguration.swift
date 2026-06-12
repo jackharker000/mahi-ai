@@ -55,32 +55,6 @@ public struct EngineConfiguration: Sendable {
     }
 }
 
-/// Builds the best available engine: the real Rust core when its bindings are
-/// linked, otherwise the preview mock (so the app always runs).
-public enum EngineFactory {
-    public struct Result {
-        public let engine: any MahiEngineProtocol
-        /// False when running on `PreviewMockEngine`; the UI shows a banner.
-        public let isLive: Bool
-    }
-
-    public static func makeEngine(
-        configuration: EngineConfiguration,
-        computerController: any ComputerControlling
-    ) -> Result {
-        #if canImport(Mahi)
-        do {
-            let engine = try FfiEngine(
-                configuration: configuration,
-                computerController: computerController
-            )
-            return Result(engine: engine, isLive: true)
-        } catch {
-            // Fall through to the mock; the UI surfaces the failure.
-            return Result(engine: PreviewMockEngine(), isLive: false)
-        }
-        #else
-        return Result(engine: PreviewMockEngine(), isLive: false)
-        #endif
-    }
-}
+// NOTE: engine selection lives in EngineFactory.swift (the canonical factory,
+// currently backed by `FfiBufferedEngine`). When the streaming FFI lands, its
+// `FfiEngine` adapter will consume `EngineConfiguration` directly.
