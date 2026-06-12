@@ -58,5 +58,11 @@ jobs:
       - name: Test mahi-compute with hosted providers
         run: cargo test -p mahi-compute --features hosted
 
+      - name: Test mahi-compute with the local llama runtime
+        run: cargo test -p mahi-compute --features local-llm
+
+      - name: Clippy mahi-compute with all compute features
+        run: cargo clippy -p mahi-compute --all-targets --features hosted,local-llm -- -D warnings
+
       - name: Test mahi-tooling with net tools
         run: cargo test -p mahi-tooling --features net

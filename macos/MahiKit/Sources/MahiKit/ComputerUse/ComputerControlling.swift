@@ -3,8 +3,22 @@
 // docs/backend/domains/02-tooling-integrations.md §3). The UniFFI-generated protocol
 // (`import Mahi`, produced by `macos/scripts/build-xcframework.sh`) is bridged to this
 // one by `FfiComputerControllerAdapter` in Engine/FfiEngine.swift, so all real
-// ScreenCaptureKit / Accessibility / CGEvent code lives here, independent of the
+// screen-capture / Accessibility / CGEvent code lives here, independent of the
 // generated bindings.
+//
+// The protocol carries two equivalent surfaces:
+//
+//   • Rich primitives (`screenshot() -> Screenshot`, `click(at:button:clickCount:)`,
+//     `pressKey(_ combo: KeyCombo)`, …) — what `MahiComputerController` implements
+//     and what Swift-side callers use.
+//
+//   • A simple-typed mirror (`screenshotPNG() -> Data`, `describeUI() ->
+//     [UIElementInfo]`, `click(x:y:button:)`, `pressKey(combo: String)`, …) made of
+//     `Double`/`String`/`Data` only, matching the operations the Rust core defines in
+//     crates/mahi-tooling/src/computer.rs. These are defaulted in a protocol
+//     extension to forward to the rich primitives, so the UniFFI
+//     foreign-implemented-trait bridge can call them without knowing any
+//     CoreGraphics types.
 
 import CoreGraphics
 import Foundation

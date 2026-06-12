@@ -35,6 +35,7 @@
 
 pub mod computer;
 pub mod connector;
+pub mod mcp;
 pub mod registry;
 pub mod tool;
 pub mod tools;
@@ -44,6 +45,7 @@ pub use computer::{
     UiBounds, UiElement,
 };
 pub use connector::{Connector, EchoConnector};
+pub use mcp::{load_mcp_config, McpClient, McpError, McpServerConfig};
 pub use registry::ToolRegistry;
 pub use tool::Tool;
 

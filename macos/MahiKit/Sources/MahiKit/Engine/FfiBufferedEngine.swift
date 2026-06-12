@@ -3,33 +3,41 @@
 // `Artifacts/MahiFFI.xcframework`). When those artifacts are absent this file
 // compiles to nothing and the app runs on `PreviewMockEngine`.
 //
-// This adapter wraps the Phase-0 *buffered* FFI (`MahiEngineHandle`): a turn
-// returns the assistant's full reply in one shot, which we surface through
-// `TurnHandleProtocol` as a single text event so the UI code is identical to
-// the future streaming path.
+// This adapter wraps the real streaming FFI (`MahiEngineHandle` + `TurnHandle`):
+// turns stream token-by-token with tool events and approvals, and the engine
+// also exposes local-model management, hosted config, and subagents. The Rust
+// `*Ffi` value types are mapped to MahiKit's domain types here, so the rest of
+// the app never imports `Mahi`.
 
 #if canImport(Mahi)
 
 import Foundation
 import Mahi
-import os
 
-/// `MahiEngineProtocol` backed by the real Rust core via the buffered FFI.
+/// `MahiEngineProtocol` backed by the real Rust core via the streaming FFI.
 public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
     private let handle: MahiEngineHandle
 
-    /// Open (or create) the encrypted store under `dataDirectory`.
+    /// Open (or create) the encrypted store under `dataDirectory`, wiring the
+    /// agent's computer-use tools to the real Mac controller. `@MainActor`
+    /// because the controller is constructed on the main actor.
+    @MainActor
     public init(dataDirectory: URL) throws {
         try FileManager.default.createDirectory(
             at: dataDirectory, withIntermediateDirectories: true
         )
-        handle = try MahiEngineHandle.withStore(dataDir: dataDirectory.path)
+        let host = ComputerUseHostBridge()
+        handle = try MahiEngineHandle.withStoreAndComputer(
+            dataDir: dataDirectory.path, host: host
+        )
     }
 
     /// Ephemeral in-memory engine (used by tests).
     public init() throws {
         handle = try MahiEngineHandle.inMemory()
     }
+
+    // MARK: Conversations & turns
 
     public func createConversation(mode: ComputeMode) async throws -> UUID {
         let handle = self.handle
@@ -61,7 +69,7 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
                 conversationID: conversationID,
                 role: Self.role(from: record.role),
                 content: [.text(record.text)],
-                mode: .onDevice,
+                mode: .macLan,
                 sequenceNum: record.sequenceNum
             )
         }
@@ -70,13 +78,91 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
     public func runTurn(
         conversationID: UUID, userText: String
     ) async throws -> any TurnHandleProtocol {
-        BufferedTurnHandle(handle: handle, conversationID: conversationID, userText: userText)
+        let handle = self.handle
+        let convID = conversationID.uuidString
+        let inner = try await Task.detached {
+            try handle.startTurn(conversationId: convID, text: userText)
+        }.value
+        return FfiTurnHandle(inner)
     }
 
     public func resolveApproval(approvalID: UUID, approved: Bool) async throws {
-        // The buffered FFI has no approval channel yet; on-device turns never
-        // park on approvals (no tool-calling model), so this is a no-op.
+        let handle = self.handle
+        let id = approvalID.uuidString
+        try await Task.detached {
+            try handle.resolveApproval(approvalId: id, approved: approved)
+        }.value
     }
+
+    // MARK: Local model management
+
+    public func modelCatalog() async throws -> [CatalogModel] {
+        let handle = self.handle
+        let ffi = try await Task.detached { try handle.modelCatalog() }.value
+        return ffi.map(Self.catalogModel(from:))
+    }
+
+    public func startDownload(modelID: String) async throws {
+        let handle = self.handle
+        try await Task.detached { try handle.startDownload(modelId: modelID) }.value
+    }
+
+    public func cancelDownload(modelID: String) async throws {
+        let handle = self.handle
+        try await Task.detached { try handle.cancelDownload(modelId: modelID) }.value
+    }
+
+    public func deleteModel(modelID: String) async throws {
+        let handle = self.handle
+        try await Task.detached { try handle.deleteModel(modelId: modelID) }.value
+    }
+
+    public func activateModel(modelID: String, contextTokens: Int) async throws {
+        let handle = self.handle
+        let ctx = UInt32(max(0, contextTokens))
+        try await Task.detached {
+            try handle.activateModel(modelId: modelID, contextTokens: ctx)
+        }.value
+    }
+
+    public func runtimeStatus() async throws -> RuntimeStatus {
+        let handle = self.handle
+        let ffi = await Task.detached { handle.runtimeStatus() }.value
+        return Self.runtimeStatus(from: ffi)
+    }
+
+    public func setContextWindow(contextTokens: Int) async throws {
+        let handle = self.handle
+        let ctx = UInt32(max(0, contextTokens))
+        await Task.detached { handle.setContextWindow(contextTokens: ctx) }.value
+    }
+
+    // MARK: Hosted config, goal, compact & subagents
+
+    public func setHostedConfig(_ config: HostedConfig?) async throws {
+        let handle = self.handle
+        let ffi = config.map(Self.hostedConfigFfi(from:))
+        try await Task.detached { try handle.setHostedConfig(config: ffi) }.value
+    }
+
+    public func setGoal(conversationID: UUID, goal: String) async throws {
+        let handle = self.handle
+        let id = conversationID.uuidString
+        try await Task.detached { try handle.setGoal(conversationId: id, goal: goal) }.value
+    }
+
+    public func compact(conversationID: UUID) async throws -> String {
+        let handle = self.handle
+        let id = conversationID.uuidString
+        return try await Task.detached { try handle.compact(conversationId: id) }.value
+    }
+
+    public func spawnSubagents(goals: [String]) async throws -> [String] {
+        let handle = self.handle
+        return try await Task.detached { try handle.spawnSubagents(goals: goals) }.value
+    }
+
+    // MARK: - Type mapping
 
     private static func mode(from raw: String) -> ComputeMode {
         switch raw.lowercased() {
@@ -90,44 +176,121 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
     private static func role(from raw: String) -> MessageRole {
         MessageRole(rawValue: raw) ?? .assistant
     }
+
+    private static func catalogModel(from ffi: CatalogModelFfi) -> CatalogModel {
+        CatalogModel(
+            id: ffi.id,
+            displayName: ffi.displayName,
+            family: ffi.family,
+            sizeBytes: Int64(ffi.sizeBytes),
+            quantization: ffi.quantization,
+            contextWindow: Int(ffi.contextWindow),
+            toolCalling: ffi.toolCalling,
+            description: ffi.description,
+            state: modelState(from: ffi.state)
+        )
+    }
+
+    private static func modelState(from ffi: ModelStateFfi) -> ModelState {
+        switch ffi {
+        case .notInstalled:
+            return .notInstalled
+        case let .downloading(progress, bytesDownloaded):
+            return .downloading(progress: progress, bytesDownloaded: Int64(bytesDownloaded))
+        case .installed:
+            return .installed
+        case .active:
+            return .active
+        }
+    }
+
+    private static func runtimeStatus(from ffi: RuntimeStatusFfi) -> RuntimeStatus {
+        switch ffi {
+        case .noModel:
+            return .noModel
+        case .preparingRuntime:
+            return .preparingRuntime
+        case let .starting(modelId):
+            return .starting(modelID: modelId)
+        case let .running(modelId):
+            return .running(modelID: modelId)
+        case let .failed(message):
+            return .failed(message: message)
+        }
+    }
+
+    private static func hostedConfigFfi(from config: HostedConfig) -> HostedConfigFfi {
+        let provider: String
+        switch config.provider {
+        case .anthropic: provider = "anthropic"
+        case .openAICompatible: provider = "openai"
+        }
+        return HostedConfigFfi(
+            provider: provider,
+            apiKey: config.apiKey,
+            model: config.model,
+            baseUrl: config.baseURL
+        )
+    }
 }
 
-/// Runs the buffered `send` once and replays it as a tiny event stream.
-private final class BufferedTurnHandle: TurnHandleProtocol, @unchecked Sendable {
-    private let handle: MahiEngineHandle
-    private let conversationID: UUID
-    private let userText: String
-    private let finished = OSAllocatedUnfairLock(initialState: false)
+/// Bridges the FFI `TurnHandle` (poll/cancel) to MahiKit's `TurnHandleProtocol`,
+/// mapping each `AgentEventFfi` to a domain `AgentEvent`.
+private final class FfiTurnHandle: TurnHandleProtocol, @unchecked Sendable {
+    private let inner: Mahi.TurnHandle
 
-    init(handle: MahiEngineHandle, conversationID: UUID, userText: String) {
-        self.handle = handle
-        self.conversationID = conversationID
-        self.userText = userText
+    init(_ inner: Mahi.TurnHandle) {
+        self.inner = inner
     }
 
     func pollBatch(maxEvents: UInt32) async throws -> [AgentEvent] {
-        let alreadyDone = finished.withLock { done -> Bool in
-            let was = done
-            done = true
-            return was
-        }
-        if alreadyDone { return [] }
-
-        let handle = self.handle
-        let convID = conversationID
-        let text = userText
-        let reply = try await Task.detached {
-            try handle.send(conversationId: convID.uuidString, text: text)
-        }.value
-        return [
-            .turnStarted(conversationID: convID, messageID: UUID(), mode: .onDevice),
-            .textDelta(reply.text),
-            .turnFinished(reason: .stop),
-        ]
+        let inner = self.inner
+        // `pollBatch` blocks in Rust until events arrive (or the turn ends), so
+        // run it off the cooperative pool.
+        let ffiEvents = await Task.detached { inner.pollBatch(maxEvents: maxEvents) }.value
+        return ffiEvents.compactMap(Self.event(from:))
     }
 
     func cancel() {
-        // Buffered turns are short; cancellation lands with the streaming FFI.
+        inner.cancel()
+    }
+
+    private static func event(from ffi: AgentEventFfi) -> AgentEvent? {
+        switch ffi {
+        case let .turnStarted(conversationId, messageId):
+            return .turnStarted(
+                conversationID: UUID(uuidString: conversationId) ?? UUID(),
+                messageID: UUID(uuidString: messageId) ?? UUID(),
+                mode: .macLan
+            )
+        case let .textDelta(text):
+            return .textDelta(text)
+        case let .toolProgress(text):
+            return .tool(.chunk(data: text))
+        case let .toolResult(output):
+            return .tool(.result(outputJSON: output, truncated: false))
+        case let .toolError(message):
+            return .tool(.error(message: message, retryable: false))
+        case let .approvalRequired(approvalId, summary):
+            return .approvalRequired(
+                approvalID: UUID(uuidString: approvalId) ?? UUID(),
+                summary: summary
+            )
+        case let .turnFinished(reason):
+            return .turnFinished(reason: finishReason(from: reason))
+        case let .error(message):
+            return .error(message: message)
+        }
+    }
+
+    private static func finishReason(from raw: String) -> FinishReason {
+        switch raw.lowercased() {
+        case "toolcall": return .toolCall
+        case "maxtokens": return .maxTokens
+        case "cancelled": return .cancelled
+        case "error": return .error
+        default: return .stop
+        }
     }
 }
 

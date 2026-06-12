@@ -119,6 +119,14 @@ pub enum ContentBlock {
     ArtifactRef {
         artifact_id: Uuid,
     },
+    /// An inline image (base64), e.g. a screenshot fed to a vision model so it
+    /// can *see* the screen for computer use.
+    Image {
+        /// MIME type, e.g. `image/png`.
+        media_type: String,
+        /// Base64-encoded image bytes.
+        data: String,
+    },
 }
 
 /// A persistent memory fact about the user/project.

@@ -15,7 +15,7 @@ struct MahiApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 760, minHeight: 520)
+                .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
