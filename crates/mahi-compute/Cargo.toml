@@ -10,6 +10,10 @@ repository.workspace = true
 [features]
 default = []
 hosted = ["dep:reqwest", "dep:eventsource-stream"]
+# Managed local llama.cpp runtime (mode A on the Mac): model catalog +
+# downloads, llama-server lifecycle, and an OpenAI-compat local provider.
+# Reuses the `hosted` SSE/reqwest stack for the loopback HTTP client.
+local-llm = ["hosted", "tokio/process", "tokio/fs"]
 
 [dependencies]
 mahi-contracts.workspace = true
@@ -29,3 +33,5 @@ eventsource-stream = { workspace = true, optional = true }
 [dev-dependencies]
 mahi-contracts = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Local HTTP fixtures for `local-llm` download/provider integration tests.
+axum.workspace = true

@@ -10,7 +10,7 @@ use mahi_contracts::compute::{
     CanHandleResult, FinishReason, InferenceChunk, InferenceProvider, InferenceRequest,
     InferenceStream, ToolCallDelta,
 };
-use mahi_contracts::data::MessageRole;
+use mahi_contracts::data::{ContentBlock, MessageRole};
 use mahi_contracts::error::{ContractError, InferenceError};
 use mahi_contracts::types::{
     CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile,
@@ -27,6 +27,8 @@ pub struct OpenAiCompatProvider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// Mode stamped on every emitted chunk (defaults to [`ComputeMode::Hosted`]).
+    mode: ComputeMode,
 }
 
 impl OpenAiCompatProvider {
@@ -39,7 +41,20 @@ impl OpenAiCompatProvider {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            mode: ComputeMode::Hosted,
         }
+    }
+
+    /// Same provider, but chunks are stamped with `mode` instead of `Hosted`
+    /// (e.g. [`ComputeMode::OnDevice`] for a managed local `llama-server`).
+    pub fn with_mode(mut self, mode: ComputeMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The compute mode stamped on emitted chunks.
+    pub fn mode(&self) -> ComputeMode {
+        self.mode
     }
 
     /// The streaming chat-completions endpoint for `base_url`.
@@ -51,24 +66,85 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// Render a tool output value as the string content of a `role:"tool"`
+/// message (raw text passes through; structured values serialize as JSON).
+fn tool_output_to_string(output: &Value) -> String {
+    match output {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Build the chat-completions request body for `req` (pure; unit-tested).
+///
+/// Assistant `ContentBlock::ToolCall`s serialize as OpenAI `tool_calls`
+/// (function name = tool id, arguments = JSON string); each tool-role
+/// `ContentBlock::ToolResult` becomes its own `role:"tool"` message keyed by
+/// `tool_call_id`, which is the shape the next round's model expects.
 pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
-    let messages: Vec<Value> = req
-        .messages
-        .iter()
-        .map(|m| {
-            let role = match m.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
-                MessageRole::Tool => "tool",
-            };
-            // TODO(contracts): ContentBlock::{ToolCall,ToolResult,ArtifactRef}
-            // have no lossless mapping here without per-call ids threaded
-            // through `Message`; flattened to text for now.
-            json!({ "role": role, "content": m.text_content() })
-        })
-        .collect();
+    let mut messages: Vec<Value> = Vec::new();
+    for m in &req.messages {
+        match m.role {
+            MessageRole::System => {
+                messages.push(json!({ "role": "system", "content": m.text_content() }))
+            }
+            MessageRole::User => {
+                messages.push(json!({ "role": "user", "content": m.text_content() }))
+            }
+            MessageRole::Assistant => {
+                let tool_calls: Vec<Value> = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolCall {
+                            call_id,
+                            tool_id,
+                            args,
+                        } => Some(json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_id,
+                                "arguments": serde_json::to_string(args)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            }
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                let text = m.text_content();
+                let mut msg = json!({ "role": "assistant" });
+                // OpenAI allows content:null only alongside tool_calls.
+                msg["content"] = if text.is_empty() && !tool_calls.is_empty() {
+                    Value::Null
+                } else {
+                    text.into()
+                };
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = tool_calls.into();
+                }
+                messages.push(msg);
+            }
+            MessageRole::Tool => {
+                let mut emitted = false;
+                for b in &m.content {
+                    if let ContentBlock::ToolResult { call_id, output } = b {
+                        emitted = true;
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": tool_output_to_string(output),
+                        }));
+                    }
+                }
+                // Defensive: a tool message without a structured result block
+                // still surfaces as context rather than being dropped.
+                if !emitted {
+                    messages.push(json!({ "role": "user", "content": m.text_content() }));
+                }
+            }
+        }
+    }
 
     let mut body = json!({
         "model": model,
@@ -181,7 +257,16 @@ impl OpenAiSseParser {
         if let Some(calls) = delta["tool_calls"].as_array() {
             for call in calls {
                 let index = call["index"].as_u64().unwrap_or(0);
-                let identity = self.tool_calls.entry(index).or_default();
+                // Some OpenAI-compat servers (e.g. local llama.cpp builds)
+                // omit `id`; synthesize a per-index id so parallel calls stay
+                // distinct. A real id on the first fragment overrides it.
+                let identity = self
+                    .tool_calls
+                    .entry(index)
+                    .or_insert_with(|| ToolCallIdentity {
+                        call_id: format!("call_{index}"),
+                        tool_id: String::new(),
+                    });
                 if let Some(id) = call["id"].as_str() {
                     identity.call_id = id.to_string();
                 }
@@ -295,7 +380,7 @@ impl InferenceProvider for OpenAiCompatProvider {
         let events = response.bytes_stream().eventsource();
         Ok(chunks_from_events(
             events,
-            OpenAiSseParser::new(ComputeMode::Hosted),
+            OpenAiSseParser::new(self.mode),
             cancel,
         ))
     }
@@ -366,6 +451,96 @@ mod tests {
         );
     }
 
+    /// Assistant tool calls and tool results round-trip into the OpenAI
+    /// `tool_calls` / `role:"tool"` wire shape for the next round.
+    #[test]
+    fn request_body_serializes_tool_calls_and_results() {
+        let conv = Uuid::new_v4();
+        let mut assistant = Message::text(
+            conv,
+            MessageRole::Assistant,
+            "Checking two cities.",
+            ComputeMode::Hosted,
+            1,
+        );
+        assistant.content.push(ContentBlock::ToolCall {
+            call_id: "call_1".to_string(),
+            tool_id: "get_weather".to_string(),
+            args: json!({"city": "Auckland"}),
+        });
+        assistant.content.push(ContentBlock::ToolCall {
+            call_id: "call_2".to_string(),
+            tool_id: "get_weather".to_string(),
+            args: json!({"city": "Wellington"}),
+        });
+        let mut result_1 = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 2);
+        result_1.content = vec![ContentBlock::ToolResult {
+            call_id: "call_1".to_string(),
+            output: json!({"temp_c": 21}),
+        }];
+        let mut result_2 = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 3);
+        result_2.content = vec![ContentBlock::ToolResult {
+            call_id: "call_2".to_string(),
+            output: serde_json::Value::String("18C and windy".to_string()),
+        }];
+
+        let req = InferenceRequest::from_messages(vec![
+            Message::text(conv, MessageRole::User, "Weather?", ComputeMode::Hosted, 0),
+            assistant,
+            result_1,
+            result_2,
+        ]);
+        let body = request_body("test-model", &req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "Checking two cities.");
+        assert_eq!(
+            messages[1]["tool_calls"],
+            json!([
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"Auckland\"}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"Wellington\"}"},
+                },
+            ])
+        );
+
+        // Each tool result is its own role:"tool" message keyed by call id;
+        // string outputs pass through raw, structured outputs as JSON text.
+        assert_eq!(
+            messages[2],
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "{\"temp_c\":21}"})
+        );
+        assert_eq!(
+            messages[3],
+            json!({"role": "tool", "tool_call_id": "call_2", "content": "18C and windy"})
+        );
+    }
+
+    /// A tool-call-only assistant turn serializes with `content: null`.
+    #[test]
+    fn request_body_tool_call_without_text_has_null_content() {
+        let conv = Uuid::new_v4();
+        let mut assistant = Message::text(conv, MessageRole::Assistant, "", ComputeMode::Hosted, 0);
+        assistant.content = vec![ContentBlock::ToolCall {
+            call_id: "call_1".to_string(),
+            tool_id: "ping".to_string(),
+            args: json!({}),
+        }];
+        let req = InferenceRequest::from_messages(vec![assistant]);
+        let body = request_body("test-model", &req);
+        let msg = &body["messages"][0];
+        assert!(msg["content"].is_null());
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "ping");
+    }
+
     #[test]
     fn endpoint_trims_trailing_slash() {
         let p = OpenAiCompatProvider::new("https://api.example.com/", "k", "m");
@@ -373,6 +548,14 @@ mod tests {
             p.chat_completions_url(),
             "https://api.example.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn mode_defaults_to_hosted_and_with_mode_overrides() {
+        let p = OpenAiCompatProvider::new("http://127.0.0.1:8080", "", "m");
+        assert_eq!(p.mode(), ComputeMode::Hosted);
+        let p = p.with_mode(ComputeMode::OnDevice);
+        assert_eq!(p.mode(), ComputeMode::OnDevice);
     }
 
     #[test]
@@ -437,6 +620,71 @@ mod tests {
         assert_eq!(chunks[3].finish_reason, Some(FinishReason::ToolCall));
     }
 
+    /// Two parallel tool calls in one assistant turn: fragments interleave by
+    /// `index`, ids arrive only on each call's first fragment.
+    #[test]
+    fn parser_parallel_tool_calls_interleaved() {
+        let mut parser = OpenAiSseParser::new(ComputeMode::Hosted);
+        let mut chunks = Vec::new();
+        for data in [
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"get_time","arguments":""}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"Auck"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":\"Pacific/"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"land\"}"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"Auckland\"}"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ] {
+            chunks.extend(parser.handle_data(data));
+        }
+        let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+
+        let args_for = |call_id: &str| -> String {
+            chunks
+                .iter()
+                .filter_map(|c| c.tool_call_delta.as_ref())
+                .filter(|d| d.call_id == call_id)
+                .map(|d| d.args_delta.as_str())
+                .collect()
+        };
+        assert_eq!(args_for("call_a"), r#"{"city":"Auckland"}"#);
+        assert_eq!(args_for("call_b"), r#"{"tz":"Pacific/Auckland"}"#);
+        assert!(chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .all(|d| (d.call_id == "call_a" && d.tool_id == "get_weather")
+                || (d.call_id == "call_b" && d.tool_id == "get_time")));
+        assert_eq!(
+            chunks.last().unwrap().finish_reason,
+            Some(FinishReason::ToolCall)
+        );
+    }
+
+    /// Servers that never send a tool-call `id` (seen in some local
+    /// llama.cpp builds) still get distinct per-index call ids.
+    #[test]
+    fn parser_synthesizes_call_ids_when_server_omits_them() {
+        let mut parser = OpenAiSseParser::new(ComputeMode::Hosted);
+        let mut chunks = Vec::new();
+        for data in [
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"alpha","arguments":"{}"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"name":"beta","arguments":"{}"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            chunks.extend(parser.handle_data(data));
+        }
+        let deltas: Vec<ToolCallDelta> = chunks
+            .into_iter()
+            .map(Result::unwrap)
+            .filter_map(|c| c.tool_call_delta)
+            .collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].call_id, "call_0");
+        assert_eq!(deltas[1].call_id, "call_1");
+        assert_ne!(deltas[0].call_id, deltas[1].call_id);
+    }
+
     #[test]
     fn parser_malformed_json_yields_provider_error() {
         let mut parser = OpenAiSseParser::new(ComputeMode::Hosted);
@@ -480,5 +728,45 @@ mod tests {
             Some(FinishReason::Stop)
         );
         assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::Hosted));
+    }
+
+    /// End-to-end: canned tool-call SSE bytes -> eventsource -> parser.
+    #[tokio::test]
+    async fn sse_bytes_tool_call_end_to_end() {
+        use crate::hosted::sse::chunks_from_events;
+        use futures::{stream, StreamExt};
+        use std::convert::Infallible;
+
+        let raw = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"type\":\"function\",\"function\":{\"name\":\"file_read\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"notes.txt\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let events = stream::iter(vec![Ok::<_, Infallible>(raw.as_bytes())]).eventsource();
+        let chunks: Vec<_> = chunks_from_events(
+            events,
+            OpenAiSseParser::new(ComputeMode::Hosted),
+            CancellationToken::new(),
+        )
+        .collect()
+        .await;
+
+        let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+        let args: String = chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .map(|d| d.args_delta.as_str())
+            .collect();
+        assert_eq!(args, r#"{"path":"notes.txt"}"#);
+        assert!(chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .all(|d| d.call_id == "call_9" && d.tool_id == "file_read"));
+        assert_eq!(
+            chunks.last().unwrap().finish_reason,
+            Some(FinishReason::ToolCall)
+        );
     }
 }

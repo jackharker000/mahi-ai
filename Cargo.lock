@@ -1200,8 +1200,10 @@ dependencies = [
  "chrono",
  "futures",
  "mahi-contracts",
+ "mahi-tooling",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -1234,6 +1236,7 @@ name = "mahi-compute"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "eventsource-stream",
  "futures",
