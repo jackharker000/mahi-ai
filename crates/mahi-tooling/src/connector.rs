@@ -51,7 +51,10 @@ pub(crate) struct ConnectorTool {
 
 impl ConnectorTool {
     pub(crate) fn new(descriptor: ToolDescriptor, connector: Arc<dyn Connector>) -> Self {
-        Self { descriptor, connector }
+        Self {
+            descriptor,
+            connector,
+        }
     }
 }
 
@@ -62,7 +65,9 @@ impl Tool for ConnectorTool {
     }
 
     async fn run(&self, args: serde_json::Value, cancel: CancellationToken) -> ToolEventStream {
-        self.connector.invoke(&self.descriptor.id, args, cancel).await
+        self.connector
+            .invoke(&self.descriptor.id, args, cancel)
+            .await
     }
 }
 

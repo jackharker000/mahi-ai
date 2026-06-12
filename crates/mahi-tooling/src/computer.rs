@@ -127,11 +127,17 @@ impl MockComputerController {
 
     /// Snapshot of every action performed so far, in order.
     pub fn actions(&self) -> Vec<ControllerAction> {
-        self.actions.lock().expect("mock action lock poisoned").clone()
+        self.actions
+            .lock()
+            .expect("mock action lock poisoned")
+            .clone()
     }
 
     fn log(&self, action: ControllerAction) {
-        self.actions.lock().expect("mock action lock poisoned").push(action);
+        self.actions
+            .lock()
+            .expect("mock action lock poisoned")
+            .push(action);
     }
 }
 
@@ -151,7 +157,11 @@ impl ComputerController for MockComputerController {
 
     async fn describe_ui(&self) -> Result<Vec<UiElement>, ContractError> {
         self.log(ControllerAction::DescribeUi);
-        Ok(self.elements.lock().expect("mock elements lock poisoned").clone())
+        Ok(self
+            .elements
+            .lock()
+            .expect("mock elements lock poisoned")
+            .clone())
     }
 
     async fn click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), ContractError> {
@@ -165,7 +175,9 @@ impl ComputerController for MockComputerController {
     }
 
     async fn type_text(&self, text: &str) -> Result<(), ContractError> {
-        self.log(ControllerAction::TypeText { text: text.to_string() });
+        self.log(ControllerAction::TypeText {
+            text: text.to_string(),
+        });
         Ok(())
     }
 
@@ -175,7 +187,9 @@ impl ComputerController for MockComputerController {
     }
 
     async fn key(&self, combo: &str) -> Result<(), ContractError> {
-        self.log(ControllerAction::Key { combo: combo.to_string() });
+        self.log(ControllerAction::Key {
+            combo: combo.to_string(),
+        });
         Ok(())
     }
 

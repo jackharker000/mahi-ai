@@ -94,10 +94,15 @@ async fn local_bus_delivers_control_and_fails_after_close() {
 
     bus.close();
     assert!(bus.is_closed());
-    let err = bus.send(kill).await.expect_err("send after close must fail");
+    let err = bus
+        .send(kill)
+        .await
+        .expect_err("send after close must fail");
     assert!(matches!(
         err,
-        ConnectivityError::ChannelClosed { channel: ChannelId::Control }
+        ConnectivityError::ChannelClosed {
+            channel: ChannelId::Control
+        }
     ));
 }
 
@@ -114,11 +119,16 @@ async fn tcp_loopback_delivers_framed_envelope() {
     let mut server_inference = server.subscribe(ChannelId::Inference);
     let mut server_sync = server.subscribe(ChannelId::Sync);
 
-    let client = TcpTransport::connect(addr).await.expect("connect to listener");
+    let client = TcpTransport::connect(addr)
+        .await
+        .expect("connect to listener");
 
     let session_id = Uuid::new_v4();
     let sent = inference_chunk_envelope(session_id, 7);
-    client.send(sent.clone()).await.expect("client send succeeds");
+    client
+        .send(sent.clone())
+        .await
+        .expect("client send succeeds");
 
     let got = timeout(RECV_TIMEOUT, server_inference.next())
         .await
@@ -155,7 +165,10 @@ async fn tcp_loopback_is_bidirectional() {
         payload_type: "Heartbeat".to_string(),
         payload_bytes: serde_json::to_vec(&json!({ "at": "2026-06-11T00:00:00Z" })).unwrap(),
     };
-    server.send(heartbeat.clone()).await.expect("server send succeeds");
+    server
+        .send(heartbeat.clone())
+        .await
+        .expect("server send succeeds");
 
     let got = timeout(RECV_TIMEOUT, client_control.next())
         .await
@@ -189,7 +202,9 @@ async fn session_expired_token_is_rejected() {
         chrono::Duration::milliseconds(-1), // already expired at issue time
     );
 
-    let err = manager.validate(&token).expect_err("expired token must fail");
+    let err = manager
+        .validate(&token)
+        .expect_err("expired token must fail");
     assert!(matches!(err, ConnectivityError::Transport { .. }));
     assert!(err.to_string().contains("expired"), "got: {err}");
 }
@@ -201,14 +216,19 @@ async fn session_tampered_token_is_rejected() {
 
     // Forge a longer expiry without re-signing.
     token.expires_at += chrono::Duration::days(365);
-    let err = manager.validate(&token).expect_err("tampered token must fail");
+    let err = manager
+        .validate(&token)
+        .expect_err("tampered token must fail");
     assert!(err.to_string().contains("signature"), "got: {err}");
 }
 
 #[tokio::test]
 async fn session_kill_invalidates_and_downstream_sends_fail() {
     let manager = Arc::new(SessionManager::new());
-    let token = manager.issue(Uuid::new_v4(), vec![Capability::Inference, Capability::Takeover]);
+    let token = manager.issue(
+        Uuid::new_v4(),
+        vec![Capability::Inference, Capability::Takeover],
+    );
     manager.validate(&token).expect("valid before kill");
 
     // The takeover ("controlling") indicator flag.
@@ -232,7 +252,9 @@ async fn session_kill_invalidates_and_downstream_sends_fail() {
     assert!(manager.kill(token.session_id));
 
     // ...and everything downstream is dead.
-    let err = manager.validate(&token).expect_err("killed session must fail");
+    let err = manager
+        .validate(&token)
+        .expect_err("killed session must fail");
     assert!(err.to_string().contains("killed"), "got: {err}");
     assert!(!manager.is_controlling(token.session_id));
     assert!(manager.active_sessions().is_empty());
@@ -247,14 +269,16 @@ async fn session_kill_invalidates_and_downstream_sends_fail() {
 #[tokio::test]
 async fn session_idle_timeout_rejects_stale_sessions() {
     let manager = SessionManager::with_config(
-        Duration::from_millis(50),       // idle timeout
-        chrono::Duration::minutes(10),   // token TTL (not the trigger here)
+        Duration::from_millis(50),     // idle timeout
+        chrono::Duration::minutes(10), // token TTL (not the trigger here)
     );
     let token = manager.issue(Uuid::new_v4(), vec![Capability::Inference]);
     manager.validate(&token).expect("fresh session is active");
 
     tokio::time::sleep(Duration::from_millis(120)).await;
-    let err = manager.validate(&token).expect_err("idle session must fail");
+    let err = manager
+        .validate(&token)
+        .expect_err("idle session must fail");
     assert!(err.to_string().contains("idle"), "got: {err}");
 }
 

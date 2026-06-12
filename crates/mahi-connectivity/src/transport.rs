@@ -220,7 +220,9 @@ impl MultiplexedBus for TcpBus {
         let tx = pick_sender(&self.queues, envelope.channel)?;
         tx.send(envelope)
             .await
-            .map_err(|e| ConnectivityError::ChannelClosed { channel: e.0.channel })
+            .map_err(|e| ConnectivityError::ChannelClosed {
+                channel: e.0.channel,
+            })
     }
 
     fn subscribe(&self, channel: ChannelId) -> EnvelopeStream {

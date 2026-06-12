@@ -37,12 +37,18 @@ impl OnDeviceProvider {
 
     /// Provider streaming a fixed canned reply.
     pub fn canned(reply: impl Into<String>) -> Self {
-        Self { reply: Some(reply.into()), descriptor: Self::default_descriptor() }
+        Self {
+            reply: Some(reply.into()),
+            descriptor: Self::default_descriptor(),
+        }
     }
 
     /// Provider that echoes the user's last message back (`"You said: ..."`).
     pub fn echo() -> Self {
-        Self { reply: None, descriptor: Self::default_descriptor() }
+        Self {
+            reply: None,
+            descriptor: Self::default_descriptor(),
+        }
     }
 
     fn default_descriptor() -> ModelDescriptor {
@@ -66,7 +72,10 @@ impl OnDeviceProvider {
             size_bytes: None,
             quantization: None,
             source: ModelSource::OnDevice,
-            perf_profile: PerfProfile { ttft_ms: 25, tok_per_sec: 40.0 },
+            perf_profile: PerfProfile {
+                ttft_ms: 25,
+                tok_per_sec: 40.0,
+            },
         }
     }
 }
@@ -105,7 +114,11 @@ impl InferenceProvider for OnDeviceProvider {
         let reply = match &self.reply {
             Some(r) => r.clone(),
             None => {
-                let last = req.messages.last().map(|m| m.text_content()).unwrap_or_default();
+                let last = req
+                    .messages
+                    .last()
+                    .map(|m| m.text_content())
+                    .unwrap_or_default();
                 format!("You said: {last}")
             }
         };

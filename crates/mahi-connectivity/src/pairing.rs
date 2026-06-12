@@ -204,7 +204,9 @@ impl PairingManager {
 
     /// Is this peer currently trusted (paired and not revoked)?
     pub fn is_trusted(&self, peer_id: Uuid) -> bool {
-        self.trust_record(peer_id).map(|r| !r.revoked).unwrap_or(false)
+        self.trust_record(peer_id)
+            .map(|r| !r.revoked)
+            .unwrap_or(false)
     }
 
     /// Revoke trust in a peer. Returns `true` if a record existed.
@@ -273,7 +275,11 @@ mod tests {
         // Revocation flips the trust answer.
         assert!(initiator.revoke(responder_id));
         assert!(!initiator.is_trusted(responder_id));
-        assert!(initiator.trust_record(responder_id).unwrap().revoked_at.is_some());
+        assert!(initiator
+            .trust_record(responder_id)
+            .unwrap()
+            .revoked_at
+            .is_some());
     }
 
     #[test]
@@ -282,7 +288,11 @@ mod tests {
         let challenge = initiator.begin_pairing();
         let responder_keys = PlaceholderKeypair::generate();
 
-        let wrong_code = if challenge.code == "000000" { "000001" } else { "000000" };
+        let wrong_code = if challenge.code == "000000" {
+            "000001"
+        } else {
+            "000000"
+        };
         let bad_tag = PairingManager::confirmation_tag(
             wrong_code,
             &challenge.local_keypair.public_key,

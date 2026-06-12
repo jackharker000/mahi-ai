@@ -22,7 +22,7 @@ serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "fs"] }
 tokio-util.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, optional = true }

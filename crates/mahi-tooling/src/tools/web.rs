@@ -5,9 +5,11 @@
 //! registered and report an honest, non-retryable error. The response-parsing
 //! helpers compile unconditionally and are unit-tested without any network.
 
-use crate::tool::{ok_result, parse_args, tool_error, Tool};
+use crate::tool::{parse_args, tool_error, Tool};
 use async_trait::async_trait;
-use mahi_contracts::tooling::{DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream};
+use mahi_contracts::tooling::{
+    DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream,
+};
 use mahi_contracts::types::ComputeMode;
 use serde::Deserialize;
 use serde_json::json;
@@ -15,8 +17,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Web tools require network: every mode except on-device (which gets a
 /// cached/partial variant later — see mode matrix row "Web search/fetch").
-const WEB_MODES: [ComputeMode; 3] =
-    [ComputeMode::MacLan, ComputeMode::MacRemote, ComputeMode::Hosted];
+const WEB_MODES: [ComputeMode; 3] = [
+    ComputeMode::MacLan,
+    ComputeMode::MacRemote,
+    ComputeMode::Hosted,
+];
 
 /// Cap on fetched body size surfaced to the model.
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -62,15 +67,24 @@ pub(crate) fn strip_tags(html: &str) -> String {
         if bytes[i] == b'<' {
             // Skip script/style blocks entirely.
             if lower[i..].starts_with("<script") {
-                i = lower[i..].find("</script").map(|j| i + j).unwrap_or(bytes.len());
+                i = lower[i..]
+                    .find("</script")
+                    .map(|j| i + j)
+                    .unwrap_or(bytes.len());
                 continue;
             }
             if lower[i..].starts_with("<style") {
-                i = lower[i..].find("</style").map(|j| i + j).unwrap_or(bytes.len());
+                i = lower[i..]
+                    .find("</style")
+                    .map(|j| i + j)
+                    .unwrap_or(bytes.len());
                 continue;
             }
             // Skip to the end of this tag.
-            i = html[i..].find('>').map(|j| i + j + 1).unwrap_or(bytes.len());
+            i = html[i..]
+                .find('>')
+                .map(|j| i + j + 1)
+                .unwrap_or(bytes.len());
             out.push(' ');
             continue;
         }
@@ -111,10 +125,14 @@ fn utf8_len(first_byte: u8) -> usize {
 /// Parse a DuckDuckGo Instant Answer API response (`format=json`) into hits.
 /// Handles `AbstractURL`/`Heading`/`AbstractText` plus flat and nested
 /// `RelatedTopics` entries.
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
 pub(crate) fn parse_search_response(body: &serde_json::Value, max: usize) -> Vec<SearchHit> {
     let mut hits = Vec::new();
 
-    let abstract_url = body.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("");
+    let abstract_url = body
+        .get("AbstractURL")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if !abstract_url.is_empty() {
         hits.push(SearchHit {
             url: abstract_url.to_string(),
@@ -140,7 +158,9 @@ pub(crate) fn parse_search_response(body: &serde_json::Value, max: usize) -> Vec
                 collect(nested, hits, max);
                 continue;
             }
-            let Some(url) = topic.get("FirstURL").and_then(|v| v.as_str()) else { continue };
+            let Some(url) = topic.get("FirstURL").and_then(|v| v.as_str()) else {
+                continue;
+            };
             let text = topic.get("Text").and_then(|v| v.as_str()).unwrap_or(url);
             hits.push(SearchHit {
                 url: url.to_string(),
@@ -164,7 +184,9 @@ pub(crate) fn validate_url(url: &str) -> Result<(), String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         Ok(())
     } else {
-        Err(format!("unsupported URL (must be http:// or https://): {url}"))
+        Err(format!(
+            "unsupported URL (must be http:// or https://): {url}"
+        ))
     }
 }
 
@@ -298,7 +320,10 @@ impl Tool for WebFetchTool {
         {
             match net::get_text(&args.url).await {
                 Ok((status, body)) => crate::tool::events(
-                    fetch_events(&args.url, status, &body).into_iter().map(Ok).collect(),
+                    fetch_events(&args.url, status, &body)
+                        .into_iter()
+                        .map(Ok)
+                        .collect(),
                 ),
                 Err(msg) => tool_error(msg, true),
             }
@@ -317,6 +342,7 @@ pub struct WebSearchTool;
 struct WebSearchArgs {
     query: String,
     #[serde(default)]
+    #[cfg_attr(not(feature = "net"), allow(dead_code))]
     max_results: Option<usize>,
 }
 
@@ -384,7 +410,10 @@ impl Tool for WebSearchTool {
                 Ok(body) => {
                     let hits = parse_search_response(&body, max);
                     crate::tool::events(
-                        search_events(&args.query, &hits).into_iter().map(Ok).collect(),
+                        search_events(&args.query, &hits)
+                            .into_iter()
+                            .map(Ok)
+                            .collect(),
                     )
                 }
                 Err(msg) => tool_error(msg, true),
@@ -416,7 +445,10 @@ mod net {
             .await
             .map_err(|e| format!("request to {url} failed: {e}"))?;
         let status = resp.status().as_u16();
-        let body = resp.text().await.map_err(|e| format!("failed reading body of {url}: {e}"))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed reading body of {url}: {e}"))?;
         Ok((status, body))
     }
 
@@ -445,7 +477,10 @@ mod tests {
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
         assert!(!text.contains("not text"));
-        assert!(!text.contains("  "), "whitespace must be collapsed: {text:?}");
+        assert!(
+            !text.contains("  "),
+            "whitespace must be collapsed: {text:?}"
+        );
     }
 
     #[test]
@@ -464,7 +499,10 @@ mod tests {
         });
         let hits = parse_search_response(&body, 10);
         assert_eq!(hits.len(), 3);
-        assert_eq!(hits[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert_eq!(
+            hits[0].url,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
         assert_eq!(hits[0].title, "Rust (programming language)");
         assert_eq!(hits[1].title, "Result A");
         assert_eq!(hits[2].url, "https://example.com/b");
@@ -484,10 +522,18 @@ mod tests {
 
     #[test]
     fn fetch_events_emit_citation_then_result() {
-        let events = fetch_events("https://example.com", 200, "<title>Example</title><p>Body text</p>");
+        let events = fetch_events(
+            "https://example.com",
+            200,
+            "<title>Example</title><p>Body text</p>",
+        );
         assert_eq!(events.len(), 2);
         match &events[0] {
-            ToolEvent::Citation { url, title, excerpt } => {
+            ToolEvent::Citation {
+                url,
+                title,
+                excerpt,
+            } => {
                 assert_eq!(url, "https://example.com");
                 assert_eq!(title.as_deref(), Some("Example"));
                 assert!(excerpt.as_deref().unwrap_or_default().contains("Body text"));
@@ -507,13 +553,25 @@ mod tests {
     #[test]
     fn search_events_emit_one_citation_per_hit_then_result() {
         let hits = vec![
-            SearchHit { url: "https://a.example".into(), title: "A".into(), snippet: None },
-            SearchHit { url: "https://b.example".into(), title: "B".into(), snippet: Some("bee".into()) },
+            SearchHit {
+                url: "https://a.example".into(),
+                title: "A".into(),
+                snippet: None,
+            },
+            SearchHit {
+                url: "https://b.example".into(),
+                title: "B".into(),
+                snippet: Some("bee".into()),
+            },
         ];
         let events = search_events("letters", &hits);
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], ToolEvent::Citation { url, .. } if url == "https://a.example"));
-        assert!(matches!(&events[1], ToolEvent::Citation { url, .. } if url == "https://b.example"));
+        assert!(
+            matches!(&events[0], ToolEvent::Citation { url, .. } if url == "https://a.example")
+        );
+        assert!(
+            matches!(&events[1], ToolEvent::Citation { url, .. } if url == "https://b.example")
+        );
         match &events[2] {
             ToolEvent::Result { output, .. } => {
                 assert_eq!(output["query"], "letters");

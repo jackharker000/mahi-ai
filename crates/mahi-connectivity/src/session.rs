@@ -119,18 +119,15 @@ impl SessionManager {
         };
         token.hmac = self.sign(&token);
 
-        self.sessions
-            .lock()
-            .expect("session lock poisoned")
-            .insert(
-                token.session_id,
-                SessionEntry {
-                    token: token.clone(),
-                    last_activity: Instant::now(),
-                    killed: false,
-                    controlling: false,
-                },
-            );
+        self.sessions.lock().expect("session lock poisoned").insert(
+            token.session_id,
+            SessionEntry {
+                token: token.clone(),
+                last_activity: Instant::now(),
+                killed: false,
+                controlling: false,
+            },
+        );
         token
     }
 

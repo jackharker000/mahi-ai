@@ -10,7 +10,9 @@ use mahi_contracts::compute::{
 };
 use mahi_contracts::data::{Message, MessageRole};
 use mahi_contracts::error::{ContractError, InferenceError};
-use mahi_contracts::types::{CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile};
+use mahi_contracts::types::{
+    CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile,
+};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -25,7 +27,10 @@ struct TestProvider {
 
 impl TestProvider {
     fn basic(id: &'static str) -> Self {
-        Self { id, caps: CapabilitySet::none() }
+        Self {
+            id,
+            caps: CapabilitySet::none(),
+        }
     }
 
     fn with_tools(id: &'static str) -> Self {
@@ -77,7 +82,10 @@ impl InferenceProvider for TestProvider {
         // Wrong-on-purpose active_mode: the router must overwrite it.
         let chunks = vec![
             Ok(InferenceChunk::text(self.id, ComputeMode::OnDevice)),
-            Ok(InferenceChunk::finish(FinishReason::Stop, ComputeMode::OnDevice)),
+            Ok(InferenceChunk::finish(
+                FinishReason::Stop,
+                ComputeMode::OnDevice,
+            )),
         ];
         Ok(Box::pin(futures::stream::iter(chunks)))
     }
@@ -105,7 +113,10 @@ fn tool_request() -> InferenceRequest {
 }
 
 async fn collect(stream: InferenceStream) -> Vec<InferenceChunk> {
-    stream.map(|c| c.expect("chunk should be Ok")).collect().await
+    stream
+        .map(|c| c.expect("chunk should be Ok"))
+        .collect()
+        .await
 }
 
 fn expect_pin_violation(err: ContractError, expected: ComputeMode) {
@@ -120,14 +131,24 @@ fn expect_pin_violation(err: ContractError, expected: ComputeMode) {
 #[tokio::test]
 async fn router_prefers_mac_lan_over_hosted_and_on_device() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::basic("hosted")))
-        .add_provider(ComputeMode::MacLan, Arc::new(TestProvider::basic("mac-lan")))
+        .add_provider(
+            ComputeMode::MacLan,
+            Arc::new(TestProvider::basic("mac-lan")),
+        )
         .build();
 
-    let chunks =
-        collect(router.generate(text_request("hi"), CancellationToken::new()).await.unwrap())
-            .await;
+    let chunks = collect(
+        router
+            .generate(text_request("hi"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
     assert!(!chunks.is_empty());
     assert!(
         chunks.iter().all(|c| c.active_mode == ComputeMode::MacLan),
@@ -141,27 +162,53 @@ async fn router_prefers_mac_lan_over_hosted_and_on_device() {
 async fn router_prefers_mac_remote_over_hosted_when_no_lan() {
     let router = InferenceRouter::builder()
         .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::basic("hosted")))
-        .add_provider(ComputeMode::MacRemote, Arc::new(TestProvider::basic("mac-remote")))
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::MacRemote,
+            Arc::new(TestProvider::basic("mac-remote")),
+        )
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .build();
 
-    let chunks =
-        collect(router.generate(text_request("hi"), CancellationToken::new()).await.unwrap())
-            .await;
-    assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::MacRemote));
+    let chunks = collect(
+        router
+            .generate(text_request("hi"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(chunks
+        .iter()
+        .all(|c| c.active_mode == ComputeMode::MacRemote));
 }
 
 #[tokio::test]
 async fn router_skips_incapable_providers() {
     // MacLan is most preferred but cannot do tool calling; Hosted can.
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::MacLan, Arc::new(TestProvider::basic("mac-lan")))
-        .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::with_tools("hosted")))
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::MacLan,
+            Arc::new(TestProvider::basic("mac-lan")),
+        )
+        .add_provider(
+            ComputeMode::Hosted,
+            Arc::new(TestProvider::with_tools("hosted")),
+        )
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .build();
 
-    let chunks =
-        collect(router.generate(tool_request(), CancellationToken::new()).await.unwrap()).await;
+    let chunks = collect(
+        router
+            .generate(tool_request(), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
     assert!(
         chunks.iter().all(|c| c.active_mode == ComputeMode::Hosted),
         "router must skip incapable MacLan and pick Hosted"
@@ -171,42 +218,66 @@ async fn router_skips_incapable_providers() {
 #[tokio::test]
 async fn router_falls_back_to_on_device_as_last_resort() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .build();
 
-    let chunks =
-        collect(router.generate(text_request("hi"), CancellationToken::new()).await.unwrap())
-            .await;
-    assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::OnDevice));
+    let chunks = collect(
+        router
+            .generate(text_request("hi"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(chunks
+        .iter()
+        .all(|c| c.active_mode == ComputeMode::OnDevice));
 }
 
 #[tokio::test]
 async fn pin_is_honored_over_preference_order() {
     // MacLan would normally win; the pin forces Hosted.
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::MacLan, Arc::new(TestProvider::basic("mac-lan")))
+        .add_provider(
+            ComputeMode::MacLan,
+            Arc::new(TestProvider::basic("mac-lan")),
+        )
         .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::basic("hosted")))
         .pin(Some(ComputeMode::Hosted))
         .build();
 
-    let chunks =
-        collect(router.generate(text_request("hi"), CancellationToken::new()).await.unwrap())
-            .await;
+    let chunks = collect(
+        router
+            .generate(text_request("hi"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
     assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::Hosted));
-    assert_eq!(router.descriptor().id, "hosted", "descriptor must reflect the pinned provider");
+    assert_eq!(
+        router.descriptor().id,
+        "hosted",
+        "descriptor must reflect the pinned provider"
+    );
 }
 
 #[tokio::test]
 async fn pin_to_unregistered_mode_is_a_pin_violation() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .pin(Some(ComputeMode::MacRemote))
         .build();
 
     let err = router
         .generate(text_request("hi"), CancellationToken::new())
         .await
-        .expect_err("pinned-but-unregistered mode must error, never fall back");
+        .err()
+        .expect("pinned-but-unregistered mode must error, never fall back");
     expect_pin_violation(err, ComputeMode::MacRemote);
 }
 
@@ -215,28 +286,39 @@ async fn pin_to_incapable_provider_is_a_pin_violation_not_a_fallback() {
     // OnDevice cannot do tools; Hosted could — but the pin must NOT silently
     // fall back to it.
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
-        .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::with_tools("hosted")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
+        .add_provider(
+            ComputeMode::Hosted,
+            Arc::new(TestProvider::with_tools("hosted")),
+        )
         .pin(Some(ComputeMode::OnDevice))
         .build();
 
     let err = router
         .generate(tool_request(), CancellationToken::new())
         .await
-        .expect_err("pinned-but-incapable mode must error, never fall back");
+        .err()
+        .expect("pinned-but-incapable mode must error, never fall back");
     expect_pin_violation(err, ComputeMode::OnDevice);
 }
 
 #[tokio::test]
 async fn no_capable_provider_error_when_nothing_fits() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .build();
 
     let err = router
         .generate(tool_request(), CancellationToken::new())
         .await
-        .expect_err("no registered provider supports tools");
+        .err()
+        .expect("no registered provider supports tools");
     match err {
         ContractError::Inference(InferenceError::NoCapableProvider) => {}
         other => panic!("expected NoCapableProvider, got: {other:?}"),
@@ -246,15 +328,27 @@ async fn no_capable_provider_error_when_nothing_fits() {
 #[tokio::test]
 async fn router_can_handle_probes_in_preference_order() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
-        .add_provider(ComputeMode::Hosted, Arc::new(TestProvider::with_tools("hosted")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
+        .add_provider(
+            ComputeMode::Hosted,
+            Arc::new(TestProvider::with_tools("hosted")),
+        )
         .build();
 
     assert!(router.can_handle(&text_request("hi")).await.capable);
-    assert!(router.can_handle(&tool_request()).await.capable, "hosted supports tools");
+    assert!(
+        router.can_handle(&tool_request()).await.capable,
+        "hosted supports tools"
+    );
 
     let only_on_device = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(TestProvider::basic("on-device")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(TestProvider::basic("on-device")),
+        )
         .build();
     let result = only_on_device.can_handle(&tool_request()).await;
     assert!(!result.capable);
@@ -264,14 +358,23 @@ async fn router_can_handle_probes_in_preference_order() {
 #[tokio::test]
 async fn on_device_provider_streams_to_completion_through_router() {
     let router = InferenceRouter::builder()
-        .add_provider(ComputeMode::OnDevice, Arc::new(OnDeviceProvider::canned("kia ora koutou")))
+        .add_provider(
+            ComputeMode::OnDevice,
+            Arc::new(OnDeviceProvider::canned("kia ora koutou")),
+        )
         .build();
 
-    let chunks =
-        collect(router.generate(text_request("hi"), CancellationToken::new()).await.unwrap())
-            .await;
+    let chunks = collect(
+        router
+            .generate(text_request("hi"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
 
-    assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::OnDevice));
+    assert!(chunks
+        .iter()
+        .all(|c| c.active_mode == ComputeMode::OnDevice));
     let text: String = chunks.iter().filter_map(|c| c.delta.as_deref()).collect();
     assert_eq!(text, "kia ora koutou");
     assert_eq!(
@@ -285,7 +388,10 @@ async fn on_device_provider_streams_to_completion_through_router() {
 async fn on_device_echo_replies_with_last_user_message() {
     let provider = OnDeviceProvider::echo();
     let chunks = collect(
-        provider.generate(text_request("hello mahi"), CancellationToken::new()).await.unwrap(),
+        provider
+            .generate(text_request("hello mahi"), CancellationToken::new())
+            .await
+            .unwrap(),
     )
     .await;
     let text: String = chunks.iter().filter_map(|c| c.delta.as_deref()).collect();
@@ -338,7 +444,11 @@ async fn free_function_snapshot_builder_works_without_router() {
 async fn empty_router_descriptor_is_placeholder_and_generate_errors() {
     let router = InferenceRouter::builder().build();
     assert_eq!(router.descriptor().id, "mahi-router/no-active-provider");
-    let err = router.generate(text_request("hi"), CancellationToken::new()).await.unwrap_err();
+    let err = router
+        .generate(text_request("hi"), CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
     match err {
         ContractError::Inference(InferenceError::NoCapableProvider) => {}
         other => panic!("expected NoCapableProvider, got: {other:?}"),

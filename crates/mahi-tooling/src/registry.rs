@@ -37,7 +37,10 @@ impl ToolRegistry {
     /// A registry with no tools. Add tools via [`Self::register`] or
     /// [`Self::mount_connector`].
     pub fn empty() -> Self {
-        Self { tools: RwLock::new(BTreeMap::new()), connectors: RwLock::new(Vec::new()) }
+        Self {
+            tools: RwLock::new(BTreeMap::new()),
+            connectors: RwLock::new(Vec::new()),
+        }
     }
 
     /// Registry with the standard built-in tools wired to `controller` for
@@ -75,7 +78,9 @@ impl ToolRegistry {
             Arc::new(UiKeyTool::new(controller)),
         ];
         for tool in builtins {
-            registry.register(tool).expect("built-in tool ids are unique");
+            registry
+                .register(tool)
+                .expect("built-in tool ids are unique");
         }
         registry
     }
@@ -85,7 +90,9 @@ impl ToolRegistry {
         let id = tool.descriptor().id;
         let mut tools = self.tools.write().expect("tool registry lock poisoned");
         if tools.contains_key(&id) {
-            return Err(ContractError::other(format!("tool `{id}` is already registered")));
+            return Err(ContractError::other(format!(
+                "tool `{id}` is already registered"
+            )));
         }
         tools.insert(id, tool);
         Ok(())
@@ -111,7 +118,10 @@ impl ToolRegistry {
         for descriptor in descriptors {
             self.register(Arc::new(ConnectorTool::new(descriptor, connector.clone())))?;
         }
-        self.connectors.write().expect("connector list lock poisoned").push(connector);
+        self.connectors
+            .write()
+            .expect("connector list lock poisoned")
+            .push(connector);
         Ok(())
     }
 
@@ -148,7 +158,9 @@ impl ToolInvokeContract for ToolRegistry {
             tools
                 .get(&call.tool_id)
                 .cloned()
-                .ok_or_else(|| ToolError::NotFound { tool_id: call.tool_id.clone() })?
+                .ok_or_else(|| ToolError::NotFound {
+                    tool_id: call.tool_id.clone(),
+                })?
         };
         let descriptor = tool.descriptor();
         if !descriptor.available_in_modes.contains(&call.compute_mode) {

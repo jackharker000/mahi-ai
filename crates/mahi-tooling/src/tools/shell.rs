@@ -13,7 +13,9 @@ use crate::tool::{channel_stream, contract_error, parse_args, tool_error, Tool};
 use crate::tools::file::FileScope;
 use async_trait::async_trait;
 use mahi_contracts::error::ContractError;
-use mahi_contracts::tooling::{DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream};
+use mahi_contracts::tooling::{
+    DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream,
+};
 use mahi_contracts::types::ComputeMode;
 use serde::Deserialize;
 use serde_json::json;
@@ -94,7 +96,8 @@ impl Tool for ShellExecTool {
             },
             None => self.scope.root().to_path_buf(),
         };
-        let timeout = std::time::Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let timeout =
+            std::time::Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
 
         let mut child = match Command::new("sh")
             .arg("-c")

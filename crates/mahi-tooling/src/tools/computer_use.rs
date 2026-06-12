@@ -11,7 +11,9 @@ use crate::computer::{ComputerController, MouseButton};
 use crate::tool::{events, ok_result, parse_args, tool_error, Tool};
 use async_trait::async_trait;
 use mahi_contracts::error::ContractError;
-use mahi_contracts::tooling::{DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream};
+use mahi_contracts::tooling::{
+    DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream,
+};
 use mahi_contracts::types::ComputeMode;
 use serde::Deserialize;
 use serde_json::json;

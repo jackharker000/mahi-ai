@@ -42,12 +42,18 @@ impl AnthropicProvider {
 
     /// Provider with the default model (`"claude-fable-5"`).
     pub fn new(api_key: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), model: Self::DEFAULT_MODEL.to_string() }
+        Self {
+            api_key: api_key.into(),
+            model: Self::DEFAULT_MODEL.to_string(),
+        }
     }
 
     /// Provider with an explicit model id.
     pub fn with_model(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), model: model.into() }
+        Self {
+            api_key: api_key.into(),
+            model: model.into(),
+        }
     }
 }
 
@@ -130,7 +136,12 @@ pub struct AnthropicSseParser {
 
 impl AnthropicSseParser {
     pub fn new(mode: ComputeMode) -> Self {
-        Self { mode, done: false, stop_reason: None, tool_blocks: HashMap::new() }
+        Self {
+            mode,
+            done: false,
+            stop_reason: None,
+            tool_blocks: HashMap::new(),
+        }
     }
 
     /// Whether `message_stop` (or a terminal error) has been seen.
@@ -186,8 +197,7 @@ impl AnthropicSseParser {
                     }
                     Some("input_json_delta") => {
                         let index = value["index"].as_u64().unwrap_or(0);
-                        let identity =
-                            self.tool_blocks.get(&index).cloned().unwrap_or_default();
+                        let identity = self.tool_blocks.get(&index).cloned().unwrap_or_default();
                         vec![Ok(InferenceChunk {
                             delta: None,
                             tool_call_delta: Some(ToolCallDelta {
@@ -222,7 +232,10 @@ impl AnthropicSseParser {
             "error" => {
                 self.done = true;
                 let kind = value["error"]["type"].as_str().unwrap_or("unknown");
-                let message = value["error"]["message"].as_str().unwrap_or(data).to_string();
+                let message = value["error"]["message"]
+                    .as_str()
+                    .unwrap_or(data)
+                    .to_string();
                 vec![Err(ContractError::Inference(InferenceError::Provider {
                     message: format!("anthropic stream error ({kind}): {message}"),
                     retryable: kind == "overloaded_error" || kind == "api_error",
@@ -268,8 +281,13 @@ impl InferenceProvider for AnthropicProvider {
             limitations: Vec::new(),
             size_bytes: None,
             quantization: None,
-            source: ModelSource::Hosted { provider: "anthropic".to_string() },
-            perf_profile: PerfProfile { ttft_ms: 700, tok_per_sec: 70.0 },
+            source: ModelSource::Hosted {
+                provider: "anthropic".to_string(),
+            },
+            perf_profile: PerfProfile {
+                ttft_ms: 700,
+                tok_per_sec: 70.0,
+            },
         }
     }
 
@@ -309,7 +327,11 @@ impl InferenceProvider for AnthropicProvider {
         }
 
         let events = response.bytes_stream().eventsource();
-        Ok(chunks_from_events(events, AnthropicSseParser::new(ComputeMode::Hosted), cancel))
+        Ok(chunks_from_events(
+            events,
+            AnthropicSseParser::new(ComputeMode::Hosted),
+            cancel,
+        ))
     }
 }
 
@@ -323,9 +345,21 @@ mod tests {
     fn sample_request() -> InferenceRequest {
         let conv = Uuid::new_v4();
         InferenceRequest::from_messages(vec![
-            Message::text(conv, MessageRole::System, "Be terse.", ComputeMode::Hosted, 0),
+            Message::text(
+                conv,
+                MessageRole::System,
+                "Be terse.",
+                ComputeMode::Hosted,
+                0,
+            ),
             Message::text(conv, MessageRole::User, "Hi there", ComputeMode::Hosted, 1),
-            Message::text(conv, MessageRole::Assistant, "Hello!", ComputeMode::Hosted, 2),
+            Message::text(
+                conv,
+                MessageRole::Assistant,
+                "Hello!",
+                ComputeMode::Hosted,
+                2,
+            ),
             Message::text(conv, MessageRole::User, "Bye", ComputeMode::Hosted, 3),
         ])
     }
@@ -340,9 +374,16 @@ mod tests {
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["system"], "Be terse.");
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3, "system message must not appear in messages[]");
+        assert_eq!(
+            messages.len(),
+            3,
+            "system message must not appear in messages[]"
+        );
         assert_eq!(messages[0], json!({"role": "user", "content": "Hi there"}));
-        assert_eq!(messages[1], json!({"role": "assistant", "content": "Hello!"}));
+        assert_eq!(
+            messages[1],
+            json!({"role": "assistant", "content": "Hello!"})
+        );
         assert_eq!(messages[2], json!({"role": "user", "content": "Bye"}));
     }
 
@@ -358,7 +399,8 @@ mod tests {
         }]);
         let body = request_body("claude-fable-5", &req);
         assert_eq!(body["max_tokens"], 2048);
-        assert_eq!(body["temperature"], 0.2);
+        // temperature is f32 in the contract; widened to JSON f64 it is ~0.2.
+        assert!((body["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
         assert_eq!(
             body["tools"],
             json!([{
@@ -382,13 +424,31 @@ mod tests {
         let mut parser = AnthropicSseParser::new(ComputeMode::Hosted);
         let mut chunks = Vec::new();
         for (event, data) in [
-            ("message_start", r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant"}}"#),
-            ("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#),
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
             ("ping", r#"{"type":"ping"}"#),
-            ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#),
-            ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#),
-            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
+            ),
             ("message_stop", r#"{"type":"message_stop"}"#),
         ] {
             chunks.extend(parser.handle(event, data));
@@ -406,21 +466,40 @@ mod tests {
         let mut parser = AnthropicSseParser::new(ComputeMode::Hosted);
         let mut chunks = Vec::new();
         for (event, data) in [
-            ("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#),
-            ("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#),
-            ("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Auckland\"}"}}"#),
-            ("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
-            ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Auckland\"}"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            ),
             ("message_stop", r#"{"type":"message_stop"}"#),
         ] {
             chunks.extend(parser.handle(event, data));
         }
         let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
         assert_eq!(chunks.len(), 3);
-        let deltas: Vec<&ToolCallDelta> =
-            chunks.iter().filter_map(|c| c.tool_call_delta.as_ref()).collect();
+        let deltas: Vec<&ToolCallDelta> = chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .collect();
         assert_eq!(deltas.len(), 2);
-        assert!(deltas.iter().all(|d| d.call_id == "toolu_1" && d.tool_id == "get_weather"));
+        assert!(deltas
+            .iter()
+            .all(|d| d.call_id == "toolu_1" && d.tool_id == "get_weather"));
         let args: String = deltas.iter().map(|d| d.args_delta.as_str()).collect();
         assert_eq!(args, r#"{"city":"Auckland"}"#);
         assert_eq!(chunks[2].finish_reason, Some(FinishReason::ToolCall));
@@ -468,8 +547,7 @@ mod tests {
             "event: message_stop\n",
             "data: {\"type\":\"message_stop\"}\n\n",
         );
-        let events =
-            stream::iter(vec![Ok::<_, Infallible>(raw.as_bytes())]).eventsource();
+        let events = stream::iter(vec![Ok::<_, Infallible>(raw.as_bytes())]).eventsource();
         let chunks: Vec<_> = chunks_from_events(
             events,
             AnthropicSseParser::new(ComputeMode::Hosted),
@@ -481,7 +559,10 @@ mod tests {
         let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
         let text: String = chunks.iter().filter_map(|c| c.delta.as_deref()).collect();
         assert_eq!(text, "Kia ora");
-        assert_eq!(chunks.last().unwrap().finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            chunks.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
         assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::Hosted));
     }
 }

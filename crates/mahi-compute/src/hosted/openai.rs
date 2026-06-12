@@ -35,12 +35,19 @@ impl OpenAiCompatProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        Self { base_url: base_url.into(), api_key: api_key.into(), model: model.into() }
+        Self {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+        }
     }
 
     /// The streaming chat-completions endpoint for `base_url`.
     pub fn chat_completions_url(&self) -> String {
-        format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+        format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        )
     }
 }
 
@@ -120,7 +127,12 @@ pub struct OpenAiSseParser {
 
 impl OpenAiSseParser {
     pub fn new(mode: ComputeMode) -> Self {
-        Self { mode, done: false, finish_emitted: false, tool_calls: HashMap::new() }
+        Self {
+            mode,
+            done: false,
+            finish_emitted: false,
+            tool_calls: HashMap::new(),
+        }
     }
 
     /// Whether the stream has reached `[DONE]`.
@@ -193,7 +205,10 @@ impl OpenAiSseParser {
 
         if let Some(reason) = choice["finish_reason"].as_str() {
             self.finish_emitted = true;
-            out.push(Ok(InferenceChunk::finish(map_finish_reason(reason), self.mode)));
+            out.push(Ok(InferenceChunk::finish(
+                map_finish_reason(reason),
+                self.mode,
+            )));
         }
         out
     }
@@ -233,8 +248,13 @@ impl InferenceProvider for OpenAiCompatProvider {
             limitations: Vec::new(),
             size_bytes: None,
             quantization: None,
-            source: ModelSource::Hosted { provider: "openai-compat".to_string() },
-            perf_profile: PerfProfile { ttft_ms: 600, tok_per_sec: 80.0 },
+            source: ModelSource::Hosted {
+                provider: "openai-compat".to_string(),
+            },
+            perf_profile: PerfProfile {
+                ttft_ms: 600,
+                tok_per_sec: 80.0,
+            },
         }
     }
 
@@ -273,7 +293,11 @@ impl InferenceProvider for OpenAiCompatProvider {
         }
 
         let events = response.bytes_stream().eventsource();
-        Ok(chunks_from_events(events, OpenAiSseParser::new(ComputeMode::Hosted), cancel))
+        Ok(chunks_from_events(
+            events,
+            OpenAiSseParser::new(ComputeMode::Hosted),
+            cancel,
+        ))
     }
 }
 
@@ -287,7 +311,13 @@ mod tests {
     fn sample_request() -> InferenceRequest {
         let conv = Uuid::new_v4();
         let mut req = InferenceRequest::from_messages(vec![
-            Message::text(conv, MessageRole::System, "Be terse.", ComputeMode::Hosted, 0),
+            Message::text(
+                conv,
+                MessageRole::System,
+                "Be terse.",
+                ComputeMode::Hosted,
+                0,
+            ),
             Message::text(conv, MessageRole::User, "Hi there", ComputeMode::Hosted, 1),
         ]);
         req.max_tokens = Some(256);
@@ -306,7 +336,10 @@ mod tests {
         assert_eq!(body["temperature"], 0.5);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0], json!({"role": "system", "content": "Be terse."}));
+        assert_eq!(
+            messages[0],
+            json!({"role": "system", "content": "Be terse."})
+        );
         assert_eq!(messages[1], json!({"role": "user", "content": "Hi there"}));
         assert!(body.get("tools").is_none());
     }
@@ -336,7 +369,10 @@ mod tests {
     #[test]
     fn endpoint_trims_trailing_slash() {
         let p = OpenAiCompatProvider::new("https://api.example.com/", "k", "m");
-        assert_eq!(p.chat_completions_url(), "https://api.example.com/v1/chat/completions");
+        assert_eq!(
+            p.chat_completions_url(),
+            "https://api.example.com/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -365,7 +401,10 @@ mod tests {
         let mut parser = OpenAiSseParser::new(ComputeMode::Hosted);
         let chunks = parser.handle_data("[DONE]");
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].as_ref().unwrap().finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            chunks[0].as_ref().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
     }
 
     #[test]
@@ -384,11 +423,15 @@ mod tests {
         let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
         assert_eq!(chunks.len(), 4);
 
-        let deltas: Vec<&ToolCallDelta> =
-            chunks.iter().filter_map(|c| c.tool_call_delta.as_ref()).collect();
+        let deltas: Vec<&ToolCallDelta> = chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .collect();
         assert_eq!(deltas.len(), 3);
         // Identity persists across continuation deltas that omit id/name.
-        assert!(deltas.iter().all(|d| d.call_id == "call_1" && d.tool_id == "get_weather"));
+        assert!(deltas
+            .iter()
+            .all(|d| d.call_id == "call_1" && d.tool_id == "get_weather"));
         let args: String = deltas.iter().map(|d| d.args_delta.as_str()).collect();
         assert_eq!(args, r#"{"city":"Auckland"}"#);
         assert_eq!(chunks[3].finish_reason, Some(FinishReason::ToolCall));
@@ -420,8 +463,7 @@ mod tests {
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n",
         );
-        let events =
-            stream::iter(vec![Ok::<_, Infallible>(raw.as_bytes())]).eventsource();
+        let events = stream::iter(vec![Ok::<_, Infallible>(raw.as_bytes())]).eventsource();
         let chunks: Vec<_> = chunks_from_events(
             events,
             OpenAiSseParser::new(ComputeMode::Hosted),
@@ -433,7 +475,10 @@ mod tests {
         let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
         let text: String = chunks.iter().filter_map(|c| c.delta.as_deref()).collect();
         assert_eq!(text, "Hi there");
-        assert_eq!(chunks.last().unwrap().finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            chunks.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
         assert!(chunks.iter().all(|c| c.active_mode == ComputeMode::Hosted));
     }
 }

@@ -31,7 +31,11 @@ pub fn build_capability_snapshot<'a>(
         .map(|mode| {
             (
                 *mode,
-                ModeCapability { available: false, models: Vec::new(), tool_ids: Vec::new() },
+                ModeCapability {
+                    available: false,
+                    models: Vec::new(),
+                    tool_ids: Vec::new(),
+                },
             )
         })
         .collect();
@@ -50,5 +54,9 @@ pub fn build_capability_snapshot<'a>(
         // publishes the snapshot.
     }
 
-    DeviceCapabilitySnapshot { device_id, timestamp: chrono::Utc::now(), modes }
+    DeviceCapabilitySnapshot {
+        device_id,
+        timestamp: chrono::Utc::now(),
+        modes,
+    }
 }

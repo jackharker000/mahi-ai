@@ -5,7 +5,9 @@
 use crate::tool::{contract_error, events, ok_result, parse_args, tool_error, Tool};
 use async_trait::async_trait;
 use mahi_contracts::error::{ContractError, ToolError};
-use mahi_contracts::tooling::{DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream};
+use mahi_contracts::tooling::{
+    DestructiveLevel, ToolCategory, ToolDescriptor, ToolEvent, ToolEventStream,
+};
 use mahi_contracts::types::ComputeMode;
 use serde::Deserialize;
 use serde_json::json;
@@ -15,8 +17,11 @@ use tokio_util::sync::CancellationToken;
 /// Modes in which the local file tools are offered. Hosted (cloud) compute
 /// has no access to the local filesystem (mode matrix in
 /// `docs/backend/domains/02-tooling-integrations.md`).
-const FILE_MODES: [ComputeMode; 3] =
-    [ComputeMode::OnDevice, ComputeMode::MacLan, ComputeMode::MacRemote];
+const FILE_MODES: [ComputeMode; 3] = [
+    ComputeMode::OnDevice,
+    ComputeMode::MacLan,
+    ComputeMode::MacRemote,
+];
 
 /// Maximum bytes returned by `file_read` / scanned per file by `file_search`.
 const MAX_READ_BYTES: usize = 256 * 1024;
@@ -52,7 +57,9 @@ impl FileScope {
         let abs = if raw.is_absolute() {
             raw
         } else {
-            std::env::current_dir().map(|cwd| cwd.join(&raw)).unwrap_or(raw)
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&raw))
+                .unwrap_or(raw)
         };
         let root = abs.canonicalize().unwrap_or_else(|_| normalize(&abs));
         Self { root }
@@ -66,7 +73,11 @@ impl FileScope {
     /// escape, including through symlinks for paths that already exist.
     pub(crate) fn resolve(&self, raw: &str) -> Result<PathBuf, ContractError> {
         let p = Path::new(raw);
-        let joined = if p.is_absolute() { p.to_path_buf() } else { self.root.join(p) };
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.root.join(p)
+        };
         let normalized = normalize(&joined);
         if !normalized.starts_with(&self.root) {
             return Err(ToolError::SandboxViolation.into());
@@ -335,10 +346,7 @@ impl Tool for FileEditTool {
         };
         let occurrences = content.matches(&args.old_string).count();
         if occurrences == 0 {
-            return tool_error(
-                format!("old_string not found in {}", path.display()),
-                false,
-            );
+            return tool_error(format!("old_string not found in {}", path.display()), false);
         }
         if occurrences > 1 && !args.replace_all {
             return tool_error(
@@ -350,7 +358,10 @@ impl Tool for FileEditTool {
             );
         }
         let (updated, replacements) = if args.replace_all {
-            (content.replace(&args.old_string, &args.new_string), occurrences)
+            (
+                content.replace(&args.old_string, &args.new_string),
+                occurrences,
+            )
         } else {
             (content.replacen(&args.old_string, &args.new_string, 1), 1)
         };
@@ -502,11 +513,16 @@ fn search_tree(start: &Path, query: &str, max_results: usize) -> (Vec<serde_json
                 }
             }
             // Content scan, capped by size and valid UTF-8 only.
-            let small_enough = entry.metadata().map(|m| m.len() <= MAX_SEARCH_FILE_BYTES).unwrap_or(false);
+            let small_enough = entry
+                .metadata()
+                .map(|m| m.len() <= MAX_SEARCH_FILE_BYTES)
+                .unwrap_or(false);
             if !small_enough {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             for (idx, line) in content.lines().enumerate() {
                 if line.contains(query) {
                     let preview: String = line.chars().take(200).collect();
@@ -531,7 +547,10 @@ mod tests {
 
     #[test]
     fn normalize_resolves_dot_and_dotdot() {
-        assert_eq!(normalize(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+        assert_eq!(
+            normalize(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
     }
 
     #[test]
@@ -539,7 +558,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let scope = FileScope::new(dir.path());
         let err = scope.resolve("../outside.txt").expect_err("must escape");
-        assert!(matches!(err, ContractError::Tool(ToolError::SandboxViolation)));
+        assert!(matches!(
+            err,
+            ContractError::Tool(ToolError::SandboxViolation)
+        ));
     }
 
     #[test]
@@ -547,7 +569,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let scope = FileScope::new(dir.path());
         let err = scope.resolve("/etc/hostname").expect_err("must escape");
-        assert!(matches!(err, ContractError::Tool(ToolError::SandboxViolation)));
+        assert!(matches!(
+            err,
+            ContractError::Tool(ToolError::SandboxViolation)
+        ));
     }
 
     #[test]
@@ -570,7 +595,12 @@ mod tests {
         std::os::unix::fs::symlink(&secret, &link).expect("symlink");
 
         let scope = FileScope::new(dir.path());
-        let err = scope.resolve("link.txt").expect_err("symlink must not escape");
-        assert!(matches!(err, ContractError::Tool(ToolError::SandboxViolation)));
+        let err = scope
+            .resolve("link.txt")
+            .expect_err("symlink must not escape");
+        assert!(matches!(
+            err,
+            ContractError::Tool(ToolError::SandboxViolation)
+        ));
     }
 }

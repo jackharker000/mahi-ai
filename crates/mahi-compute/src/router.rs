@@ -211,11 +211,7 @@ pub struct InferenceRouterBuilder {
 impl InferenceRouterBuilder {
     /// Register `provider` for `mode`. Registering the same mode twice
     /// replaces the earlier provider (last write wins).
-    pub fn add_provider(
-        mut self,
-        mode: ComputeMode,
-        provider: Arc<dyn InferenceProvider>,
-    ) -> Self {
+    pub fn add_provider(mut self, mode: ComputeMode, provider: Arc<dyn InferenceProvider>) -> Self {
         self.providers.insert(mode, provider);
         self
     }

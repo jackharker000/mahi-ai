@@ -33,12 +33,18 @@ pub fn events(items: Vec<Result<ToolEvent, ContractError>>) -> ToolEventStream {
 
 /// A single successful, non-truncated [`ToolEvent::Result`].
 pub fn ok_result(output: serde_json::Value) -> ToolEventStream {
-    events(vec![Ok(ToolEvent::Result { output, truncated: false })])
+    events(vec![Ok(ToolEvent::Result {
+        output,
+        truncated: false,
+    })])
 }
 
 /// A single in-stream [`ToolEvent::Error`].
 pub fn tool_error(message: impl Into<String>, retryable: bool) -> ToolEventStream {
-    events(vec![Ok(ToolEvent::Error { message: message.into(), retryable })])
+    events(vec![Ok(ToolEvent::Error {
+        message: message.into(),
+        retryable,
+    })])
 }
 
 /// A single stream item carrying a hard contract error.
