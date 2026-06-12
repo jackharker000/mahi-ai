@@ -1,0 +1,29 @@
+[package]
+name = "mahi-ffi"
+description = "UniFFI bindings exposing the Mahi core to Swift/Kotlin."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mahi_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+mahi-contracts.workspace = true
+mahi-agent-core.workspace = true
+mahi-data.workspace = true
+mahi-compute.workspace = true
+mahi-tooling.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util.workspace = true
+futures.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+uniffi = { version = "0.28", features = ["cli"] }

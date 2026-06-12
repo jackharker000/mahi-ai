@@ -1,0 +1,62 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+jobs:
+  check:
+    name: fmt + clippy + test + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace
+
+  # Feature-gated tests that are off by default in the workspace build.
+  # These exercise the `hosted` provider and `net` tooling code paths, but the
+  # tests themselves are parsing/serialization only — they must never hit the
+  # network, so they are safe to run on a plain CI runner.
+  feature-tests:
+    name: feature-gated tests (hosted, net)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache key: feature-gated builds pull extra deps (reqwest, etc.)
+          key: feature-tests
+
+      - name: Test mahi-compute with hosted providers
+        run: cargo test -p mahi-compute --features hosted
+
+      - name: Test mahi-tooling with net tools
+        run: cargo test -p mahi-tooling --features net

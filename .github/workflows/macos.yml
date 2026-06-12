@@ -1,0 +1,114 @@
+name: macOS app
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-app:
+    name: build Mahi.app + DMG (unsigned)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the toolchain; `rustup show` installs it for this
+      # checkout, then the Apple targets are added to THAT toolchain (a plain
+      # toolchain action would install targets for a different, unpinned one,
+      # leaving the x86_64 slice silently missing from the xcframework).
+      - name: Install pinned toolchain + Apple targets
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-xcframework
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build Mahi.xcframework (Rust core + UniFFI Swift bindings)
+        run: ./scripts/build-xcframework.sh
+
+      - name: Generate Xcode project
+        working-directory: macos
+        run: |
+          xcodegen generate
+          # XcodeGen 2.45 stamps the Xcode-16 project format (77); rewrite it to 56
+          # so the runner's Xcode 15.4 can open the project.
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' Mahi.xcodeproj/project.pbxproj
+
+      - name: Build Mahi.app (Release, unsigned, universal)
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project Mahi.xcodeproj \
+            -scheme Mahi \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination 'generic/platform=macOS' \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+          APP="build/Build/Products/Release/Mahi.app"
+          test -d "$APP"
+          echo "== architectures in the app binary =="
+          lipo -archs "$APP/Contents/MacOS/Mahi"
+          # Hard requirement: Apple Silicon AND Intel slices both present.
+          lipo -archs "$APP/Contents/MacOS/Mahi" | grep -q arm64
+          lipo -archs "$APP/Contents/MacOS/Mahi" | grep -q x86_64
+
+      - name: Package Mahi.dmg
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release/Mahi.app"
+          # Ad-hoc sign so the app launches without a "damaged" error (still not notarized).
+          codesign --force --deep --sign - "$APP" || true
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/Mahi.app"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f Mahi.dmg
+          hdiutil create -volname "Mahi" -srcfolder "$STAGE" -ov -format UDZO Mahi.dmg
+          ls -lh Mahi.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mahi-macos-dmg
+          path: macos/Mahi.dmg
+          if-no-files-found: error
+
+      - name: Publish DMG to the rolling preview release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-preview
+          name: Mahi macOS (preview build)
+          prerelease: true
+          files: macos/Mahi.dmg
+          body: |
+            Unsigned preview build of the Mahi macOS app.
+
+            **Requirements:** macOS 13 (Ventura) or newer — Apple Silicon **and** Intel Macs
+            (universal binary).
+
+            **Install:** download `Mahi.dmg`, open it, and drag **Mahi** into **Applications**.
+            On first launch, right-click the app and choose **Open** (it is not notarized,
+            so a normal double-click is blocked by Gatekeeper the first time).

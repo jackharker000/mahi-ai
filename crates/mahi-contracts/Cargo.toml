@@ -1,0 +1,23 @@
+[package]
+name = "mahi-contracts"
+description = "Shared cross-domain seam types and traits for Mahi AI. Zero I/O."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Mock providers + helpers for tests in dependent crates.
+testkit = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
