@@ -66,6 +66,20 @@ fn tool_output_to_string(output: &Value) -> String {
     }
 }
 
+/// Anthropic `image` content blocks for any [`ContentBlock::Image`] in `m`.
+fn anthropic_image_blocks(m: &mahi_contracts::data::Message) -> Vec<Value> {
+    m.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data },
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Build the Messages API request body for `req` (pure; unit-tested).
 ///
 /// System-role messages are lifted into the top-level `system` field.
@@ -111,7 +125,7 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                 }
             }
             MessageRole::Tool => {
-                let results: Vec<Value> = m
+                let mut content: Vec<Value> = m
                     .content
                     .iter()
                     .filter_map(|b| match b {
@@ -123,16 +137,30 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                         _ => None,
                     })
                     .collect();
-                if results.is_empty() {
+                // A vision model sees the screenshot: attach inline images to the
+                // same user turn as the tool_result.
+                content.extend(anthropic_image_blocks(m));
+                if content.is_empty() {
                     // Defensive: a tool message without a structured result
                     // block still surfaces as user context.
                     messages.push(json!({"role": "user", "content": m.text_content()}));
                 } else {
-                    messages.push(json!({"role": "user", "content": results}));
+                    messages.push(json!({"role": "user", "content": content}));
                 }
             }
             MessageRole::User => {
-                messages.push(json!({"role": "user", "content": m.text_content()}))
+                let images = anthropic_image_blocks(m);
+                if images.is_empty() {
+                    messages.push(json!({"role": "user", "content": m.text_content()}));
+                } else {
+                    let mut content = Vec::new();
+                    let text = m.text_content();
+                    if !text.is_empty() {
+                        content.push(json!({"type": "text", "text": text}));
+                    }
+                    content.extend(images);
+                    messages.push(json!({"role": "user", "content": content}));
+                }
             }
         }
     }
@@ -558,6 +586,31 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn request_body_attaches_image_to_tool_result_for_vision() {
+        let conv = Uuid::new_v4();
+        let mut result = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 0);
+        result.content = vec![
+            ContentBlock::ToolResult {
+                call_id: "toolu_1".to_string(),
+                output: json!("screenshot captured"),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            },
+        ];
+        let req = InferenceRequest::from_messages(vec![result]);
+        let body = request_body("claude-fable-5", &req);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
     }
 
     #[test]

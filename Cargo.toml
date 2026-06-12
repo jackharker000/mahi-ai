@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Primitives
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
+base64 = "0.22"
 
 # Storage (mahi-data)
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -7,10 +7,12 @@
 use crate::computer::ComputerController;
 use crate::connector::{Connector, ConnectorTool};
 use crate::tool::Tool;
+use crate::tools::apple_script::AppleScriptTool;
 use crate::tools::computer_use::{
     ScreenCaptureTool, UiClickTool, UiDescribeTool, UiKeyTool, UiScrollTool, UiTypeTool,
 };
 use crate::tools::file::{FileEditTool, FileReadTool, FileScope, FileSearchTool, FileWriteTool};
+use crate::tools::run_code::RunCodeTool;
 use crate::tools::shell::ShellExecTool;
 use crate::tools::web::{WebFetchTool, WebSearchTool};
 use async_trait::async_trait;
@@ -68,6 +70,8 @@ impl ToolRegistry {
             Arc::new(FileEditTool::new(scope.clone())),
             Arc::new(FileSearchTool::new(scope.clone())),
             Arc::new(ShellExecTool::new(scope)),
+            Arc::new(AppleScriptTool::new()),
+            Arc::new(RunCodeTool::new()),
             Arc::new(WebFetchTool),
             Arc::new(WebSearchTool),
             Arc::new(ScreenCaptureTool::new(controller.clone())),

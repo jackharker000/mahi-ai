@@ -56,10 +56,6 @@ use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
 
-/// Largest context window we ask `llama-server` to allocate (bounds memory on
-/// small Macs; long-context models still load, just with an 8K window).
-const MAX_LOCAL_CONTEXT: u32 = 8192;
-
 /// The active local model: `(model_id, its provider)`.
 type LocalSlot = (String, Arc<dyn InferenceProvider>);
 
@@ -889,9 +885,11 @@ impl MahiEngineHandle {
             .map_err(MahiError::from)
     }
 
-    /// Load a downloaded model into the managed runtime (non-blocking: poll
-    /// [`Self::runtime_status`] for progress, which can take ~a minute).
-    pub fn activate_model(&self, model_id: String) -> Result<(), MahiError> {
+    /// Load a downloaded model into the managed runtime with a chosen context
+    /// window (in tokens, clamped to the model's max). Non-blocking: poll
+    /// [`Self::runtime_status`] for progress, which can take ~a minute. A bigger
+    /// context holds more history but uses more memory and runs slower.
+    pub fn activate_model(&self, model_id: String, context_tokens: u32) -> Result<(), MahiError> {
         let entry = find_entry(&model_id)
             .ok_or_else(|| MahiError::Engine(format!("unknown model `{model_id}`")))?;
         let path = self.state.manager.model_path(&model_id);
@@ -900,7 +898,10 @@ impl MahiEngineHandle {
                 "model `{model_id}` is not downloaded"
             )));
         }
-        let ctx = entry.context_window.min(MAX_LOCAL_CONTEXT);
+        // Honor the user's choice, clamped to the model's trained max context.
+        let ctx = context_tokens.clamp(512, entry.context_window);
+        // Keep the agent's history budget in step with the server's window.
+        self.engine.set_context_window(ctx as usize);
         self.set_status(RuntimeStatusFfi::Starting {
             model_id: model_id.clone(),
         });
@@ -939,6 +940,40 @@ impl MahiEngineHandle {
             .lock()
             .expect("status lock poisoned")
             .clone()
+    }
+
+    /// Set the per-turn context window in tokens — how much history the agent
+    /// sees. Larger means more context but slower / more memory; the user can
+    /// go up to ~1M for hosted models. Takes effect on the next turn. For local
+    /// models the server's window is fixed at activation, so also re-`Run` the
+    /// model to change how much it can actually process.
+    pub fn set_context_window(&self, context_tokens: u32) {
+        self.engine.set_context_window(context_tokens as usize);
+    }
+
+    /// Set (empty clears) a persistent goal for `conversation_id` — an
+    /// instruction injected into every turn of that conversation, on top of the
+    /// default agent prompt. The seam behind the `/goal` control.
+    pub fn set_goal(&self, conversation_id: String, goal: String) -> Result<(), MahiError> {
+        let conv = Uuid::parse_str(&conversation_id).map_err(MahiError::from)?;
+        let goal = if goal.trim().is_empty() {
+            None
+        } else {
+            Some(goal)
+        };
+        self.rt
+            .block_on(self.engine.set_system_prompt(conv, goal))
+            .map_err(MahiError::from)
+    }
+
+    /// Compact `conversation_id`: summarize it with the active model and pin the
+    /// summary so key context survives the sliding window. The `/compact`
+    /// control. Returns the summary (may be slow — one inference call).
+    pub fn compact(&self, conversation_id: String) -> Result<String, MahiError> {
+        let conv = Uuid::parse_str(&conversation_id).map_err(MahiError::from)?;
+        self.rt
+            .block_on(self.engine.compact_conversation(conv))
+            .map_err(MahiError::from)
     }
 
     /// Point inference at a hosted provider, or clear it (`None`) to fall back

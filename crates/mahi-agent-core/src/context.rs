@@ -42,13 +42,18 @@ pub(crate) async fn assemble_context(
 ) -> Result<Vec<Message>, ContractError> {
     let mut preamble: Vec<Message> = Vec::new();
 
-    // Always give the model a system prompt: the conversation's own, or the
-    // capable default, so every surface behaves like an agent out of the box.
-    let system_prompt = conversation
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-    preamble.push(synthetic_system(conversation, system_prompt));
+    // Always inject the capable default agent prompt, then any
+    // conversation-specific instructions (the `/goal` control) as an additional
+    // system turn, so a goal augments the agent rather than replacing it.
+    preamble.push(synthetic_system(
+        conversation,
+        DEFAULT_SYSTEM_PROMPT.to_string(),
+    ));
+    if let Some(extra) = &conversation.system_prompt {
+        if !extra.trim().is_empty() {
+            preamble.push(synthetic_system(conversation, extra.clone()));
+        }
+    }
 
     let memories = data
         .memory
@@ -167,15 +172,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_system_prompt_overrides_the_default() {
+    async fn conversation_system_prompt_augments_the_default() {
         let data = mahi_contracts::testkit::in_memory_datastore();
         let mut conv = Conversation::new(ComputeMode::OnDevice);
-        conv.system_prompt = Some("You are a terse poet.".to_string());
+        conv.system_prompt = Some("Your current goal: ship the release.".to_string());
         let ctx = assemble_context(&data, &conv, "hello", 50, 5, CONTEXT_CHAR_BUDGET)
             .await
             .unwrap();
+        // The capable default comes first, then the conversation's goal.
         assert_eq!(ctx[0].role, MessageRole::System);
-        assert_eq!(ctx[0].text_content(), "You are a terse poet.");
+        assert!(ctx[0].text_content().contains("Mahi"));
+        assert_eq!(ctx[1].role, MessageRole::System);
+        assert_eq!(
+            ctx[1].text_content(),
+            "Your current goal: ship the release."
+        );
     }
 
     #[test]

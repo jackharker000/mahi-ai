@@ -75,6 +75,20 @@ fn tool_output_to_string(output: &Value) -> String {
     }
 }
 
+/// OpenAI `image_url` content parts (data URLs) for any [`ContentBlock::Image`].
+fn openai_image_blocks(m: &mahi_contracts::data::Message) -> Vec<Value> {
+    m.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{media_type};base64,{data}") },
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Build the chat-completions request body for `req` (pure; unit-tested).
 ///
 /// Assistant `ContentBlock::ToolCall`s serialize as OpenAI `tool_calls`
@@ -89,7 +103,18 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                 messages.push(json!({ "role": "system", "content": m.text_content() }))
             }
             MessageRole::User => {
-                messages.push(json!({ "role": "user", "content": m.text_content() }))
+                let images = openai_image_blocks(m);
+                if images.is_empty() {
+                    messages.push(json!({ "role": "user", "content": m.text_content() }));
+                } else {
+                    let mut content = Vec::new();
+                    let text = m.text_content();
+                    if !text.is_empty() {
+                        content.push(json!({ "type": "text", "text": text }));
+                    }
+                    content.extend(images);
+                    messages.push(json!({ "role": "user", "content": content }));
+                }
             }
             MessageRole::Assistant => {
                 let tool_calls: Vec<Value> = m
@@ -136,6 +161,18 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                             "content": tool_output_to_string(output),
                         }));
                     }
+                }
+                // OpenAI tool messages are text-only; surface any inline images
+                // (a screenshot) as a follow-up user message so vision models
+                // can see them.
+                let images = openai_image_blocks(m);
+                if !images.is_empty() {
+                    let mut content = vec![
+                        json!({ "type": "text", "text": "Screenshot from the tool result above:" }),
+                    ];
+                    content.extend(images);
+                    messages.push(json!({ "role": "user", "content": content }));
+                    emitted = true;
                 }
                 // Defensive: a tool message without a structured result block
                 // still surfaces as context rather than being dropped.
@@ -521,6 +558,34 @@ mod tests {
         assert_eq!(
             messages[3],
             json!({"role": "tool", "tool_call_id": "call_2", "content": "18C and windy"})
+        );
+    }
+
+    #[test]
+    fn request_body_appends_image_as_user_message_after_tool_result() {
+        let conv = Uuid::new_v4();
+        let mut result = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 0);
+        result.content = vec![
+            ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                output: json!("captured"),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            },
+        ];
+        let req = InferenceRequest::from_messages(vec![result]);
+        let body = request_body("test-model", &req);
+        let messages = body["messages"].as_array().unwrap();
+        // role:"tool" text result, then a role:"user" message carrying the image.
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[1]["role"], "user");
+        let parts = messages[1]["content"].as_array().unwrap();
+        assert_eq!(parts.last().unwrap()["type"], "image_url");
+        assert_eq!(
+            parts.last().unwrap()["image_url"]["url"],
+            "data:image/png;base64,AAAA"
         );
     }
 

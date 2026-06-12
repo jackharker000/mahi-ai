@@ -4,6 +4,7 @@
 
 use crate::approval::ApprovalRegistry;
 use crate::context::{assemble_context, CONTEXT_CHAR_BUDGET};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::StreamExt;
 use mahi_contracts::agent::AgentEvent;
 use mahi_contracts::compute::{
@@ -17,6 +18,7 @@ use mahi_contracts::error::{ContractError, StoreError};
 use mahi_contracts::tooling::{ToolDescriptor, ToolEvent, ToolInvocation, ToolInvokeContract};
 use mahi_contracts::types::{CapabilitySet, ComputeMode};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -59,6 +61,9 @@ struct EngineInner {
     tools: Arc<dyn ToolInvokeContract>,
     device_id: Uuid,
     approvals: ApprovalRegistry,
+    /// Per-turn context character budget (~4 chars/token). Runtime-settable so
+    /// the user can trade speed for a larger context window (up to ~1M tokens).
+    context_budget_chars: AtomicUsize,
 }
 
 impl MahiEngine {
@@ -70,8 +75,24 @@ impl MahiEngine {
                 tools: config.tools,
                 device_id: config.device_id,
                 approvals: ApprovalRegistry::default(),
+                context_budget_chars: AtomicUsize::new(CONTEXT_CHAR_BUDGET),
             }),
         }
+    }
+
+    /// Set the context window the agent assembles per turn, in tokens. Larger
+    /// windows hold more history (and cost more/run slower). Clamped to a sane
+    /// floor; ~4 chars/token.
+    pub fn set_context_window(&self, tokens: usize) {
+        let chars = tokens.saturating_mul(4).max(2_000);
+        self.inner
+            .context_budget_chars
+            .store(chars, Ordering::Relaxed);
+    }
+
+    /// The current per-turn context budget, in characters.
+    pub fn context_budget_chars(&self) -> usize {
+        self.inner.context_budget_chars.load(Ordering::Relaxed)
     }
 
     /// Clone of the injected seams, used to construct isolated sub-engines.
@@ -183,6 +204,92 @@ impl MahiEngine {
         self.inner.approvals.resolve(approval_id, approved)
     }
 
+    /// Set (or clear, with `None`) a conversation's system prompt — the seam
+    /// behind the `/goal` control: a persistent instruction injected into every
+    /// turn of this conversation.
+    pub async fn set_system_prompt(
+        &self,
+        conversation_id: Uuid,
+        prompt: Option<String>,
+    ) -> Result<(), ContractError> {
+        let mut conversation = self
+            .inner
+            .data
+            .conversations
+            .get(conversation_id)
+            .await?
+            .ok_or(ContractError::Store(StoreError::NotFound {
+                id: conversation_id,
+            }))?;
+        conversation.system_prompt = prompt.filter(|p| !p.trim().is_empty());
+        self.inner.data.conversations.upsert(conversation).await
+    }
+
+    /// Compact a conversation: summarize it with the active model and pin the
+    /// summary into the conversation's instructions, so the key facts survive
+    /// even as old messages fall out of the sliding context window. The seam
+    /// behind the `/compact` control. Returns the summary.
+    pub async fn compact_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<String, ContractError> {
+        let mut conversation = self
+            .inner
+            .data
+            .conversations
+            .get(conversation_id)
+            .await?
+            .ok_or(ContractError::Store(StoreError::NotFound {
+                id: conversation_id,
+            }))?;
+        let history = self.history(conversation_id).await?;
+        if history.is_empty() {
+            return Ok(String::new());
+        }
+
+        let transcript = history
+            .iter()
+            .map(|m| format!("{:?}: {}", m.role, m.text_content()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!(
+            "Summarize this conversation concisely for your own future reference, \
+             preserving key facts, decisions, file paths, and open tasks. Write the \
+             summary only.\n\n{transcript}"
+        );
+        let request = InferenceRequest::from_messages(vec![Message::text(
+            conversation_id,
+            MessageRole::User,
+            prompt,
+            conversation.mode_at_creation,
+            0,
+        )]);
+        let mut stream = self
+            .inner
+            .inference
+            .generate(request, CancellationToken::new())
+            .await?;
+        let mut summary = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let Some(delta) = chunk?.delta {
+                summary.push_str(&delta);
+            }
+        }
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return Ok(summary);
+        }
+
+        // Pin the summary into the conversation's persistent instructions.
+        let pinned = format!("Summary of the conversation so far:\n{summary}");
+        conversation.system_prompt = Some(match conversation.system_prompt.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{pinned}"),
+            _ => pinned,
+        });
+        self.inner.data.conversations.upsert(conversation).await?;
+        Ok(summary)
+    }
+
     /// Delegate a list of goals to parallel, isolated subagents and collect
     /// each one's final assistant text. See [`crate::SubagentCoordinator`].
     ///
@@ -274,7 +381,7 @@ impl TurnRunner {
                 &self.user_text,
                 HISTORY_LIMIT,
                 MEMORY_RECALL_LIMIT,
-                CONTEXT_CHAR_BUDGET,
+                self.inner.context_budget_chars.load(Ordering::Relaxed),
             )
             .await?;
             let request = self.build_request(messages, &descriptors);
@@ -623,14 +730,46 @@ impl TurnRunner {
             .messages
             .next_sequence(self.conversation.id)
             .await?;
+
+        // A screenshot tool returns the raw image (hex). Always strip those
+        // bytes from the textual tool result (never dump them into the prompt),
+        // and additionally attach an Image block when the active model can see,
+        // so vision models reason about the screen — smart computer use, not
+        // blind clicking.
+        let mut text_output = output;
+        let has_image = text_output
+            .get("image_hex")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let vision = self.inner.inference.descriptor().capabilities.vision;
+        let image_block = if has_image && vision {
+            screenshot_image_block(&text_output)
+        } else {
+            None
+        };
+        if has_image {
+            if let Some(obj) = text_output.as_object_mut() {
+                obj.remove("image_hex");
+                obj.insert(
+                    "note".to_string(),
+                    serde_json::json!("screenshot captured; image attached for vision models"),
+                );
+            }
+        }
+
+        let mut content = vec![ContentBlock::ToolResult {
+            call_id: call_id.to_string(),
+            output: text_output,
+        }];
+        if let Some((media_type, data)) = image_block {
+            content.push(ContentBlock::Image { media_type, data });
+        }
+
         let message = Message {
             id: Uuid::new_v4(),
             conversation_id: self.conversation.id,
             role: MessageRole::Tool,
-            content: vec![ContentBlock::ToolResult {
-                call_id: call_id.to_string(),
-                output,
-            }],
+            content,
             model_id: None,
             mode: self.mode,
             created_at: chrono::Utc::now(),
@@ -676,6 +815,34 @@ impl TurnRunner {
         conversation.updated_at = chrono::Utc::now();
         let _ = self.inner.data.conversations.upsert(conversation).await;
     }
+}
+
+/// Build an `(media_type, base64)` image from a screenshot tool result's
+/// hex-encoded `image_hex` field (PNG bytes), for a vision model's Image block.
+fn screenshot_image_block(output: &serde_json::Value) -> Option<(String, String)> {
+    let hex = output.get("image_hex")?.as_str()?;
+    let bytes = decode_hex(hex)?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(("image/png".to_string(), BASE64.encode(&bytes)))
+}
+
+/// Decode a lowercase/uppercase hex string into bytes (`None` if malformed).
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = (bytes[i] as char).to_digit(16)?;
+        let lo = (bytes[i + 1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+        i += 2;
+    }
+    Some(out)
 }
 
 /// Derive a short conversation title from the first user message: its first

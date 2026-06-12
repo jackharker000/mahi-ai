@@ -89,7 +89,7 @@ fn downloads_and_unknown_models_are_handled_gracefully() {
         .is_err());
     // Activating a model that isn't downloaded is a clean error.
     assert!(handle
-        .activate_model("llama-3.1-8b-instruct".to_string())
+        .activate_model("llama-3.1-8b-instruct".to_string(), 8192)
         .is_err());
     // An unknown id is rejected.
     assert!(handle
