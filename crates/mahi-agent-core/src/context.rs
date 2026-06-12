@@ -11,6 +11,25 @@ use mahi_contracts::error::ContractError;
 /// Character budget for the assembled context (~4k tokens at 4 chars/token).
 pub(crate) const CONTEXT_CHAR_BUDGET: usize = 16_000;
 
+/// The default system prompt used when a conversation doesn't set its own.
+///
+/// Shapes Mahi into a capable, Claude-style local coworker: proactive,
+/// tool-using, computer-using, safe, and concise. It deliberately doesn't
+/// enumerate tools (those arrive via the request's tool specs) — it gives the
+/// behavioural frame that small local models especially need to act like an
+/// agent rather than a chatbot.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Mahi, a capable personal AI assistant running on the user's own Mac. \
+You act as a proactive coworker: understand the goal, make a short plan, and carry it out end to end rather than just describing what could be done.\n\n\
+You have tools available this turn — reading, writing, editing and searching files; running shell commands; fetching and searching the web; \
+and, when working on the Mac, controlling the computer (capturing the screen, reading the on-screen UI, clicking, typing, scrolling, and pressing keys). \
+Use them whenever they help, and prefer acting over asking. Call one or more tools, look at the results, and keep going until the task is actually done. \
+When you write or change code, match the surrounding style and keep edits minimal, correct, and runnable.\n\n\
+For computer use: capture or describe the screen before you act so you target the right element, take one careful step at a time, and check the result before the next step. \
+Some actions require the user's approval — when one is requested, wait for the decision and respect it. \
+Never type credentials or act on login, password, or payment screens; stop and let the user handle those directly.\n\n\
+Be concise and direct, and explain your actions only as much as is useful. Break large tasks into steps, and delegate independent sub-tasks to parallel subagents when that's faster. \
+If a request is ambiguous or risky, say so briefly and proceed with the most reasonable interpretation.";
+
 /// Build the message list for an inference round: synthetic system prompt,
 /// synthetic memory-recall message, then compacted recent history.
 pub(crate) async fn assemble_context(
@@ -23,9 +42,13 @@ pub(crate) async fn assemble_context(
 ) -> Result<Vec<Message>, ContractError> {
     let mut preamble: Vec<Message> = Vec::new();
 
-    if let Some(prompt) = &conversation.system_prompt {
-        preamble.push(synthetic_system(conversation, prompt.clone()));
-    }
+    // Always give the model a system prompt: the conversation's own, or the
+    // capable default, so every surface behaves like an agent out of the box.
+    let system_prompt = conversation
+        .system_prompt
+        .clone()
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    preamble.push(synthetic_system(conversation, system_prompt));
 
     let memories = data
         .memory
@@ -127,6 +150,32 @@ mod tests {
         let history = vec![msg(conv, 0, &"y".repeat(5000))];
         let compacted = compact(Vec::new(), history, 10);
         assert_eq!(compacted.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn injects_default_system_prompt_when_conversation_has_none() {
+        let data = mahi_contracts::testkit::in_memory_datastore();
+        let conv = Conversation::new(ComputeMode::OnDevice);
+        assert!(conv.system_prompt.is_none());
+        let ctx = assemble_context(&data, &conv, "hello", 50, 5, CONTEXT_CHAR_BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(ctx[0].role, MessageRole::System);
+        let text = ctx[0].text_content();
+        assert!(text.contains("Mahi"), "default prompt names the assistant");
+        assert!(text.contains("tools"), "default prompt frames tool use");
+    }
+
+    #[tokio::test]
+    async fn conversation_system_prompt_overrides_the_default() {
+        let data = mahi_contracts::testkit::in_memory_datastore();
+        let mut conv = Conversation::new(ComputeMode::OnDevice);
+        conv.system_prompt = Some("You are a terse poet.".to_string());
+        let ctx = assemble_context(&data, &conv, "hello", 50, 5, CONTEXT_CHAR_BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(ctx[0].role, MessageRole::System);
+        assert_eq!(ctx[0].text_content(), "You are a terse poet.");
     }
 
     #[test]
