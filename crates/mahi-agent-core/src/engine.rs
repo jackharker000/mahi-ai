@@ -117,7 +117,7 @@ impl MahiEngine {
         user_text: String,
         cancel: CancellationToken,
     ) -> Result<AgentEventStream, ContractError> {
-        let conversation = self
+        let mut conversation = self
             .inner
             .data
             .conversations
@@ -145,6 +145,18 @@ impl MahiEngine {
         );
         let user_message_id = user_message.id;
         self.inner.data.messages.append(user_message).await?;
+
+        // Auto-title the conversation from its first user message so the
+        // sidebar shows something meaningful instead of "New conversation".
+        if conversation.title.is_none() {
+            conversation.title = Some(title_from_text(&user_text));
+            let _ = self
+                .inner
+                .data
+                .conversations
+                .upsert(conversation.clone())
+                .await;
+        }
 
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let runner = TurnRunner {
@@ -666,6 +678,24 @@ impl TurnRunner {
     }
 }
 
+/// Derive a short conversation title from the first user message: its first
+/// non-empty line, truncated on a character boundary.
+fn title_from_text(text: &str) -> String {
+    const MAX_CHARS: usize = 48;
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("New conversation");
+    if first_line.chars().count() <= MAX_CHARS {
+        first_line.to_string()
+    } else {
+        let mut title: String = first_line.chars().take(MAX_CHARS).collect();
+        title.push('…');
+        title
+    }
+}
+
 /// Parse accumulated tool-call args; fall back to a JSON string (or `{}` when
 /// empty) so a malformed payload still round-trips to the model.
 fn parse_args(raw: &str) -> serde_json::Value {
@@ -684,5 +714,27 @@ fn truncate_for_summary(s: &str, max_chars: usize) -> String {
         let mut t: String = s.chars().take(max_chars).collect();
         t.push('…');
         t
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::title_from_text;
+
+    #[test]
+    fn uses_first_nonempty_line() {
+        assert_eq!(title_from_text("Hello there"), "Hello there");
+        assert_eq!(
+            title_from_text("  \n  Fix the login bug\nmore"),
+            "Fix the login bug"
+        );
+        assert_eq!(title_from_text("   "), "New conversation");
+    }
+
+    #[test]
+    fn truncates_long_titles_on_a_char_boundary() {
+        let title = title_from_text(&"a".repeat(100));
+        assert_eq!(title.chars().count(), 49); // 48 chars + ellipsis
+        assert!(title.ends_with('…'));
     }
 }
