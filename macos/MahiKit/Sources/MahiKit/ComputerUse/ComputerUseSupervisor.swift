@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// One observed computer-use action, rendered live in `ComputerUseOverlay`.
