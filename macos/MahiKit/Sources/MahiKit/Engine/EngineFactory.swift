@@ -11,7 +11,9 @@ public enum EngineFactory {
         return base.appendingPathComponent("Mahi", isDirectory: true)
     }
 
-    /// The engine the app should run on.
+    /// The engine the app should run on. `@MainActor` because the real engine
+    /// builds the computer-use controller on the main actor.
+    @MainActor
     public static func makeDefault() -> any MahiEngineProtocol {
         #if canImport(Mahi)
         if let engine = try? FfiBufferedEngine(dataDirectory: defaultDataDirectory()) {

@@ -18,12 +18,18 @@ import Mahi
 public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
     private let handle: MahiEngineHandle
 
-    /// Open (or create) the encrypted store under `dataDirectory`.
+    /// Open (or create) the encrypted store under `dataDirectory`, wiring the
+    /// agent's computer-use tools to the real Mac controller. `@MainActor`
+    /// because the controller is constructed on the main actor.
+    @MainActor
     public init(dataDirectory: URL) throws {
         try FileManager.default.createDirectory(
             at: dataDirectory, withIntermediateDirectories: true
         )
-        handle = try MahiEngineHandle.withStore(dataDir: dataDirectory.path)
+        let host = ComputerUseHostBridge()
+        handle = try MahiEngineHandle.withStoreAndComputer(
+            dataDir: dataDirectory.path, host: host
+        )
     }
 
     /// Ephemeral in-memory engine (used by tests).

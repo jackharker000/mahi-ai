@@ -47,8 +47,10 @@ public final class AppModel: ObservableObject {
     private var turnTask: Task<Void, Never>?
     private var modelPollTask: Task<Void, Never>?
 
-    public init(engine: any MahiEngineProtocol = EngineFactory.makeDefault()) {
-        self.engine = engine
+    public init(engine: (any MahiEngineProtocol)? = nil) {
+        // Built in the @MainActor init body (not a default argument) so the
+        // engine's main-actor-bound construction is correctly isolated.
+        self.engine = engine ?? EngineFactory.makeDefault()
     }
 
     public func bootstrap() async {
