@@ -1,3 +1,4 @@
+import AppKit
 import MahiKit
 import SwiftUI
 
@@ -14,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("hostedAPIKey") private var hostedAPIKey: String = ""
 
     @State private var didSave = false
+    @State private var permissions = (screenRecording: false, accessibility: false)
 
     var body: some View {
         TabView {
@@ -92,8 +94,53 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Computer use") {
+                permissionRow(
+                    name: "Screen Recording",
+                    granted: permissions.screenRecording,
+                    hint: "Lets Mahi see what's on screen."
+                )
+                permissionRow(
+                    name: "Accessibility",
+                    granted: permissions.accessibility,
+                    hint: "Lets Mahi read the UI and control the Mac."
+                )
+                HStack(spacing: 8) {
+                    Button("Open Privacy Settings") {
+                        if let url = URL(
+                            string: "x-apple.systempreferences:com.apple.preference.security?Privacy"
+                        ) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    Button("Refresh") {
+                        permissions = MahiComputerController.permissionsStatus()
+                    }
+                }
+                Text("Grant these in System Settings → Privacy & Security, then relaunch Mahi. "
+                    + "Mahi only acts on the steps you approve, and never on login or payment screens.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .onAppear { permissions = MahiComputerController.permissionsStatus() }
+    }
+
+    private func permissionRow(name: String, granted: Bool, hint: String) -> some View {
+        LabeledContent {
+            Label(
+                granted ? "Granted" : "Not granted",
+                systemImage: granted ? "checkmark.circle.fill" : "xmark.circle"
+            )
+            .foregroundStyle(granted ? Color.green : Color.secondary)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                Text(hint).font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var providerBinding: Binding<HostedProvider> {
@@ -111,7 +158,9 @@ struct SettingsView: View {
             Image(systemName: "sparkles").font(.largeTitle)
             Text("Mahi AI").font(.title2).bold()
             Text("Local-first, multi-surface AI assistant.").foregroundStyle(.secondary)
-            Text("Phase 0 · on-device preview").font(.caption).foregroundStyle(.secondary)
+            Text("Local models · tools · agents · computer use")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

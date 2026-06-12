@@ -124,6 +124,7 @@ struct ModelsView: View {
                     if catalogModel.toolCalling {
                         badge("Tools", color: .blue)
                     }
+                    fitBadge(for: catalogModel)
                 }
                 Text(detailLine(for: catalogModel))
                     .font(.caption)
@@ -163,6 +164,36 @@ struct ModelsView: View {
             .background(color.opacity(0.15))
             .foregroundStyle(color)
             .clipShape(Capsule())
+    }
+
+    // MARK: RAM fit
+
+    /// This Mac's physical memory, in bytes.
+    private static let physicalMemory = Int64(bitPattern: ProcessInfo.processInfo.physicalMemory)
+
+    /// How well a model is expected to run on this Mac, from its weight size.
+    private enum Fit { case comfortable, tight, tooBig }
+
+    private func fit(for catalogModel: CatalogModel) -> Fit {
+        // A Q4 model needs roughly its weight size plus ~1.5 GB of runtime
+        // overhead in RAM for a usable context; leave the OS comfortable
+        // headroom (use ~70% of physical memory).
+        let needed = Double(catalogModel.sizeBytes) + 1_500_000_000
+        let usable = Double(Self.physicalMemory) * 0.7
+        if needed <= usable { return .comfortable }
+        if Double(catalogModel.sizeBytes) <= usable { return .tight }
+        return .tooBig
+    }
+
+    @ViewBuilder private func fitBadge(for catalogModel: CatalogModel) -> some View {
+        switch fit(for: catalogModel) {
+        case .comfortable:
+            badge("Fits your Mac", color: .green)
+        case .tight:
+            badge("Tight on RAM", color: .orange)
+        case .tooBig:
+            badge("Needs more RAM", color: .red)
+        }
     }
 
     // MARK: Per-state controls
