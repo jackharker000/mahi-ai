@@ -134,6 +134,41 @@ impl ToolRegistry {
             .map(|c| c.id().to_string())
             .collect()
     }
+
+    /// Register every tool a connected [`McpClient`] advertised as a namespaced
+    /// (`mcp__<server>__<tool>`) registry tool. The client is shared across all
+    /// of its adapters, so dropping the registry tears the server down.
+    ///
+    /// All-or-nothing: if any namespaced id already exists nothing is
+    /// registered. Returns the registered tool ids on success.
+    pub fn attach_mcp_server(
+        &self,
+        client: Arc<crate::mcp::McpClient>,
+    ) -> Result<Vec<String>, ContractError> {
+        let server = client.server_name().to_string();
+        let tools = client.list_tools();
+        let ids: Vec<String> = tools
+            .iter()
+            .map(|t| crate::mcp::mcp_tool_id(&server, &t.name))
+            .collect();
+        {
+            let existing = self.tools.read().expect("tool registry lock poisoned");
+            for id in &ids {
+                if existing.contains_key(id) {
+                    return Err(ContractError::other(format!(
+                        "MCP server `{server}` contributes tool `{id}` which is already registered"
+                    )));
+                }
+            }
+        }
+        for tool in &tools {
+            self.register(Arc::new(crate::mcp::McpToolAdapter::new(
+                Arc::clone(&client),
+                tool,
+            )))?;
+        }
+        Ok(ids)
+    }
 }
 
 #[async_trait]
