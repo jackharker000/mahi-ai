@@ -8,19 +8,102 @@ import SwiftUI
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     private let streamingAnchor = "streaming-bubble"
+    @State private var showGoalSheet = false
+    @State private var goalText = ""
 
     var body: some View {
         VStack(spacing: 0) {
+            if let info = model.infoText {
+                infoBanner(info)
+            }
             transcript
             Divider()
             composer
         }
         .navigationTitle("Chat")
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                backendBadge
+            ToolbarItem(placement: .automatic) { backendBadge }
+            ToolbarItem(placement: .automatic) { actionsMenu }
+        }
+        .sheet(isPresented: $showGoalSheet) { goalSheet }
+    }
+
+    /// Goal / compact / model-switch controls (the `/goal` and `/compact` tools).
+    private var actionsMenu: some View {
+        Menu {
+            Button {
+                Task { await model.compact() }
+            } label: {
+                Label("Compact conversation", systemImage: "rectangle.compress.vertical")
+            }
+            Button {
+                goalText = ""
+                showGoalSheet = true
+            } label: {
+                Label("Set goal…", systemImage: "target")
+            }
+            if !installedModels.isEmpty {
+                Menu("Switch model") {
+                    ForEach(installedModels) { installedModel in
+                        Button {
+                            Task { await model.activate(modelID: installedModel.id) }
+                        } label: {
+                            if installedModel.state == .active {
+                                Label(installedModel.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(installedModel.displayName)
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .help("Goal, compact, and model")
+    }
+
+    private var installedModels: [CatalogModel] {
+        model.models.filter { $0.state == .installed || $0.state == .active }
+    }
+
+    private func infoBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle")
+            Text(text).font(.callout).textSelection(.enabled)
+            Spacer()
+            Button { model.infoText = nil } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.1))
+    }
+
+    private var goalSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Conversation goal").font(.headline)
+            Text("A persistent instruction Mahi keeps in mind for this whole conversation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextEditor(text: $goalText)
+                .frame(minWidth: 360, minHeight: 100)
+                .border(Color.secondary.opacity(0.3))
+            HStack {
+                Button("Clear goal") {
+                    Task { await model.setGoal("") }
+                    showGoalSheet = false
+                }
+                Spacer()
+                Button("Cancel") { showGoalSheet = false }
+                Button("Set goal") {
+                    Task { await model.setGoal(goalText) }
+                    showGoalSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
             }
         }
+        .padding()
+        .frame(width: 420)
     }
 
     /// "Local · Qwen2.5 7B" while the managed runtime serves a model;

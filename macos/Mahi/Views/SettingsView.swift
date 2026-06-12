@@ -11,6 +11,7 @@ struct SettingsView: View {
         HostedProvider.anthropic.rawValue
     @AppStorage("hostedModelID") private var hostedModelID: String = "claude-fable-5"
     @AppStorage("hostedBaseURL") private var hostedBaseURL: String = ""
+    @AppStorage("hostedContextTokens") private var hostedContextTokens: Int = 32768
     // TODO: move to Keychain — @AppStorage is plaintext defaults, fine only for dev.
     @AppStorage("hostedAPIKey") private var hostedAPIKey: String = ""
 
@@ -65,6 +66,20 @@ struct SettingsView: View {
                         prompt: Text("https://my-server.example/v1")
                     )
                 }
+
+                Picker("Context window", selection: $hostedContextTokens) {
+                    ForEach([8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 1_048_576], id: \.self) {
+                        tokens in
+                        Text(contextLabel(tokens)).tag(tokens)
+                    }
+                }
+                .onChange(of: hostedContextTokens) { _ in
+                    let tokens = hostedContextTokens
+                    Task { await model.setContextWindow(tokens: tokens) }
+                }
+                Text("Hosted models support very large context — larger is slower and costs more.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
                     Button("Save") {
@@ -141,6 +156,13 @@ struct SettingsView: View {
                 Text(hint).font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// A short label for a context window, e.g. "32K" or "1M".
+    private func contextLabel(_ tokens: Int) -> String {
+        if tokens >= 1_048_576 { return "\(tokens / 1_048_576)M tokens" }
+        if tokens >= 1024 { return "\(tokens / 1024)K tokens" }
+        return "\(tokens) tokens"
     }
 
     private var providerBinding: Binding<HostedProvider> {

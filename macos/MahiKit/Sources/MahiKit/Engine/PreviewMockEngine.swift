@@ -153,12 +153,27 @@ public final class PreviewMockEngine: MahiEngineProtocol, @unchecked Sendable {
         try models.deleteModel(modelID: modelID)
     }
 
-    public func activateModel(modelID: String) async throws {
-        try models.activateModel(modelID: modelID)
+    public func activateModel(modelID: String, contextTokens: Int) async throws {
+        try models.activateModel(modelID: modelID, contextTokens: contextTokens)
     }
 
     public func runtimeStatus() async throws -> RuntimeStatus {
         models.runtimeSnapshot()
+    }
+
+    public func setContextWindow(contextTokens: Int) async throws {
+        models.setContextWindow(contextTokens)
+    }
+
+    /// The `contextTokens` passed to the most recent successful
+    /// `activateModel` (test/preview introspection).
+    public var activationContextTokens: Int? {
+        models.activationContextTokensSnapshot()
+    }
+
+    /// The last value passed to `setContextWindow` (test/preview introspection).
+    public var contextWindowTokens: Int? {
+        models.contextWindowSnapshot()
     }
 
     // MARK: MahiEngineProtocol — hosted provider
@@ -170,6 +185,30 @@ public final class PreviewMockEngine: MahiEngineProtocol, @unchecked Sendable {
     /// The last stored hosted config (test/preview introspection).
     public var hostedConfig: HostedConfig? {
         models.hostedConfigSnapshot()
+    }
+
+    // MARK: MahiEngineProtocol — agent control
+
+    public func setGoal(conversationID: UUID, goal: String) async throws {
+        await state.setGoal(conversationID: conversationID, goal: goal)
+    }
+
+    public func compact(conversationID: UUID) async throws -> String {
+        // A brief pause so the UI's "working" affordances are exercised.
+        try await Task.sleep(for: .milliseconds(150))
+        try Task.checkCancellation()
+        return await state.compact(conversationID: conversationID)
+    }
+
+    /// The standing goal stored for a conversation (test/preview introspection).
+    public func goal(forConversation id: UUID) async -> String? {
+        await state.goal(for: id)
+    }
+
+    /// The last compaction summary stored for a conversation
+    /// (test/preview introspection).
+    public func compactSummary(forConversation id: UUID) async -> String? {
+        await state.compactSummary(for: id)
     }
 
     // MARK: MahiEngineProtocol — subagents
@@ -288,6 +327,10 @@ final class MockModelStore: Sendable {
         var downloadTasks: [String: Task<Void, Never>] = [:]
         /// Bumped on every activate/delete so a stale activation task stops writing.
         var activationEpoch: Int = 0
+        /// The context size requested by the most recent successful activation.
+        var activationContextTokens: Int?
+        /// The last value passed to `setContextWindow`.
+        var contextWindowTokens: Int?
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: Guarded())
@@ -317,6 +360,18 @@ final class MockModelStore: Sendable {
 
     func setHostedConfig(_ config: HostedConfig?) {
         lock.withLock { $0.hostedConfig = config }
+    }
+
+    func setContextWindow(_ tokens: Int) {
+        lock.withLock { $0.contextWindowTokens = tokens }
+    }
+
+    func contextWindowSnapshot() -> Int? {
+        lock.withLock { $0.contextWindowTokens }
+    }
+
+    func activationContextTokensSnapshot() -> Int? {
+        lock.withLock { $0.activationContextTokens }
     }
 
     // MARK: Downloads
@@ -412,7 +467,7 @@ final class MockModelStore: Sendable {
 
     // MARK: Runtime activation
 
-    func activateModel(modelID: String) throws {
+    func activateModel(modelID: String, contextTokens: Int) throws {
         let epoch: Int = try lock.withLock { state in
             guard let index = state.catalog.firstIndex(where: { $0.id == modelID }) else {
                 throw EngineError.invalidIdentifier(modelID)
@@ -426,6 +481,7 @@ final class MockModelStore: Sendable {
                 )
             }
             state.activationEpoch += 1
+            state.activationContextTokens = contextTokens
             state.runtime = .preparingRuntime
             return state.activationEpoch
         }
@@ -667,9 +723,37 @@ actor MockEngineState {
     private var approvalWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var turnCounter = 0
     private(set) var activeMode: ComputeMode = .onDevice
+    /// Standing goal per conversation (the "/goal" agent control).
+    private var goals: [UUID: String] = [:]
+    /// Last compaction summary per conversation (the "/compact" agent control).
+    private var compactSummaries: [UUID: String] = [:]
 
     func setActiveMode(_ mode: ComputeMode) {
         activeMode = mode
+    }
+
+    // MARK: Goal / compact (agent controls)
+
+    func setGoal(conversationID: UUID, goal: String) {
+        let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        goals[conversationID] = trimmed.isEmpty ? nil : trimmed
+    }
+
+    func goal(for conversationID: UUID) -> String? {
+        goals[conversationID]
+    }
+
+    /// Summarize (mock) and pin a conversation's summary.
+    func compact(conversationID: UUID) -> String {
+        let count = messages[conversationID]?.count ?? 0
+        guard count > 0 else { return "" }
+        let summary = "Summary: condensed \(count) message\(count == 1 ? "" : "s") in this conversation."
+        compactSummaries[conversationID] = summary
+        return summary
+    }
+
+    func compactSummary(for conversationID: UUID) -> String? {
+        compactSummaries[conversationID]
     }
 
     /// 1-based count of turns run on this engine (drives the periodic approval).

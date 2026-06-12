@@ -110,7 +110,7 @@ final class PreviewMockEngineModelTests: XCTestCase {
         }
         XCTAssertTrue(installed)
 
-        try await engine.activateModel(modelID: modelID)
+        try await engine.activateModel(modelID: modelID, contextTokens: 8192)
 
         // The runtime must immediately be in a transitioning state.
         let status = try await engine.runtimeStatus()
@@ -131,7 +131,7 @@ final class PreviewMockEngineModelTests: XCTestCase {
     func testActivateNotInstalledModelThrows() async throws {
         let engine = makeFastEngine()
         do {
-            try await engine.activateModel(modelID: "gemma-2-9b-q4_k_m")
+            try await engine.activateModel(modelID: "gemma-2-9b-q4_k_m", contextTokens: 8192)
             XCTFail("activating a model that is not installed should throw")
         } catch {
             // expected
@@ -144,7 +144,7 @@ final class PreviewMockEngineModelTests: XCTestCase {
 
         try await engine.startDownload(modelID: modelID)
         _ = try await poll { try await self.model(modelID, in: engine).state == .installed }
-        try await engine.activateModel(modelID: modelID)
+        try await engine.activateModel(modelID: modelID, contextTokens: 8192)
         _ = try await poll { try await engine.runtimeStatus() == .running(modelID: modelID) }
 
         try await engine.deleteModel(modelID: modelID)

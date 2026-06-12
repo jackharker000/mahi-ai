@@ -21,9 +21,15 @@ public final class AppModel: ObservableObject {
     // Local model manager
     @Published public private(set) var models: [CatalogModel] = []
     @Published public private(set) var runtime: RuntimeStatus = .noModel
+    /// The context window (tokens) the user has chosen for new model runs /
+    /// hosted turns. Larger = more context, slower.
+    @Published public var contextTokens: Int = 8192
 
     // Tool activity within the current streaming turn
     @Published public private(set) var activeTool: ActiveTool?
+
+    // Transient info banner (e.g. a /compact summary).
+    @Published public var infoText: String?
 
     // Subagents
     @Published public private(set) var agentResults: [String] = []
@@ -150,11 +156,42 @@ public final class AppModel: ObservableObject {
         await refreshModels()
     }
 
-    public func activate(modelID: String) async {
-        do { try await engine.activateModel(modelID: modelID) } catch {
+    public func activate(modelID: String, contextTokens: Int? = nil) async {
+        let tokens = contextTokens ?? self.contextTokens
+        self.contextTokens = tokens
+        do { try await engine.activateModel(modelID: modelID, contextTokens: tokens) } catch {
             errorText = error.localizedDescription
         }
         await refreshModels()
+    }
+
+    /// Resize the context window for subsequent turns (hosted models support
+    /// very large windows; bigger is slower).
+    public func setContextWindow(tokens: Int) async {
+        contextTokens = tokens
+        do { try await engine.setContextWindow(contextTokens: tokens) } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    /// Set (empty clears) a persistent goal for the current conversation.
+    public func setGoal(_ goal: String) async {
+        guard let convID = selectedID else { return }
+        do { try await engine.setGoal(conversationID: convID, goal: goal) } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    /// Compact the current conversation, surfacing the summary as an info banner.
+    public func compact() async {
+        guard let convID = selectedID else { return }
+        do {
+            let summary = try await engine.compact(conversationID: convID)
+            infoText = summary.isEmpty ? "Nothing to compact yet." : "Compacted. \(summary)"
+            await select(convID)
+        } catch {
+            errorText = error.localizedDescription
+        }
     }
 
     /// User-facing display name for a catalog id, when known.

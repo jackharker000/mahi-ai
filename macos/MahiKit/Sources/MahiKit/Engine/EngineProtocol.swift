@@ -90,11 +90,29 @@ public protocol MahiEngineProtocol: AnyObject, Sendable {
     func startDownload(modelID: String) async throws
     func cancelDownload(modelID: String) async throws
     func deleteModel(modelID: String) async throws
-    func activateModel(modelID: String) async throws
+
+    /// Load `modelID` into the managed runtime with a context window of
+    /// `contextTokens` tokens (the engine clamps to the model's maximum).
+    /// Larger windows use more memory and slow generation down.
+    func activateModel(modelID: String, contextTokens: Int) async throws
     func runtimeStatus() async throws -> RuntimeStatus
+
+    /// Resize the context window used for subsequent turns without reloading
+    /// the model. Hosted providers honor very large windows (up to ~1M tokens).
+    func setContextWindow(contextTokens: Int) async throws
 
     // Hosted (cloud) provider configuration; nil clears it.
     func setHostedConfig(_ config: HostedConfig?) async throws
+
+    // Agent control (the "/goal" and "/compact" commands).
+
+    /// Set (or replace) the standing goal that steers the agent across every
+    /// turn of `conversationID`.
+    func setGoal(conversationID: UUID, goal: String) async throws
+
+    /// Summarize-and-prune the conversation's context; returns the summary
+    /// the agent will carry forward.
+    func compact(conversationID: UUID) async throws -> String
 
     // Parallel subagents: returns one short result summary per goal.
     func spawnSubagents(goals: [String]) async throws -> [String]

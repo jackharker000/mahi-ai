@@ -226,10 +226,22 @@ struct ModelsView: View {
                     Text("Starting…").font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Button("Run") {
-                    pendingActivationID = catalogModel.id
-                    Task { await model.activate(modelID: catalogModel.id) }
+                Menu("Run") {
+                    Section("Context window — larger is slower, uses more memory") {
+                        ForEach(contextOptions(max: catalogModel.contextWindow), id: \.self) { tokens in
+                            Button(contextLabel(tokens)) {
+                                pendingActivationID = catalogModel.id
+                                Task {
+                                    await model.activate(
+                                        modelID: catalogModel.id, contextTokens: tokens
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
                 .disabled(model.runtime.isTransitioning)
             }
 
@@ -238,6 +250,20 @@ struct ModelsView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.green)
         }
+    }
+
+    /// Standard context-window choices (tokens), capped at the model's maximum.
+    private func contextOptions(max: Int) -> [Int] {
+        let all = [4096, 8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 1_048_576]
+        let capped = all.filter { $0 <= max }
+        return capped.isEmpty ? [Swift.max(1, max)] : capped
+    }
+
+    /// A short label for a context window, e.g. "8K" or "1M".
+    func contextLabel(_ tokens: Int) -> String {
+        if tokens >= 1_048_576 { return "\(tokens / 1_048_576)M tokens" }
+        if tokens >= 1024 { return "\(tokens / 1024)K tokens" }
+        return "\(tokens) tokens"
     }
 
     /// True while the runtime is spinning up specifically for this model.

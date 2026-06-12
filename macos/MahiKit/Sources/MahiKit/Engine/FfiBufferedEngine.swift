@@ -117,9 +117,12 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
         try await Task.detached { try handle.deleteModel(modelId: modelID) }.value
     }
 
-    public func activateModel(modelID: String) async throws {
+    public func activateModel(modelID: String, contextTokens: Int) async throws {
         let handle = self.handle
-        try await Task.detached { try handle.activateModel(modelId: modelID) }.value
+        let ctx = UInt32(max(0, contextTokens))
+        try await Task.detached {
+            try handle.activateModel(modelId: modelID, contextTokens: ctx)
+        }.value
     }
 
     public func runtimeStatus() async throws -> RuntimeStatus {
@@ -128,12 +131,30 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
         return Self.runtimeStatus(from: ffi)
     }
 
-    // MARK: Hosted config & subagents
+    public func setContextWindow(contextTokens: Int) async throws {
+        let handle = self.handle
+        let ctx = UInt32(max(0, contextTokens))
+        await Task.detached { handle.setContextWindow(contextTokens: ctx) }.value
+    }
+
+    // MARK: Hosted config, goal, compact & subagents
 
     public func setHostedConfig(_ config: HostedConfig?) async throws {
         let handle = self.handle
         let ffi = config.map(Self.hostedConfigFfi(from:))
         try await Task.detached { try handle.setHostedConfig(config: ffi) }.value
+    }
+
+    public func setGoal(conversationID: UUID, goal: String) async throws {
+        let handle = self.handle
+        let id = conversationID.uuidString
+        try await Task.detached { try handle.setGoal(conversationId: id, goal: goal) }.value
+    }
+
+    public func compact(conversationID: UUID) async throws -> String {
+        let handle = self.handle
+        let id = conversationID.uuidString
+        return try await Task.detached { try handle.compact(conversationId: id) }.value
     }
 
     public func spawnSubagents(goals: [String]) async throws -> [String] {
