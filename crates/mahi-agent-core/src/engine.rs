@@ -293,11 +293,12 @@ impl MahiEngine {
     /// Delegate a list of goals to parallel, isolated subagents and collect
     /// each one's final assistant text. See [`crate::SubagentCoordinator`].
     ///
-    /// Subagent conversations default to [`ComputeMode::OnDevice`], the mode
-    /// that is always available; use the coordinator directly to pick another.
+    /// Subagents run in [`ComputeMode::MacLan`] so they get the full local
+    /// toolset (files, shell, code, computer use, MCP) — capable coworkers, not
+    /// chat-only helpers. Use the coordinator directly to pick another mode.
     pub async fn spawn_subagents(&self, goals: Vec<String>) -> Result<Vec<String>, ContractError> {
         crate::subagent::SubagentCoordinator::from_engine(self)
-            .run_goals(goals, ComputeMode::OnDevice)
+            .run_goals(goals, ComputeMode::MacLan)
             .await
     }
 }
