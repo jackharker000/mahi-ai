@@ -27,6 +27,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.mahi.app
         PRODUCT_NAME: Mahi
+        # The SwiftPM package exposes a target named "Mahi" (the UniFFI bindings);
+        # give the app a distinct *module* name so both can emit swiftmodules.
+        PRODUCT_MODULE_NAME: MahiApp
         INFOPLIST_FILE: Mahi/Info.plist
         CODE_SIGN_ENTITLEMENTS: Mahi/Mahi.entitlements
         CODE_SIGN_STYLE: Manual
