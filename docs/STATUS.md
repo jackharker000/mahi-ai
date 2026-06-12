@@ -50,11 +50,9 @@ identity and the steps below, so it does not gate the PR.
 
 ## Known gaps / next steps
 
-1. **Computer-use callback bridge.** The macOS `MahiComputerController` (CGEvent input,
-   Accessibility tree, screen capture, permission prompts) is implemented and the app sandbox is
-   off so it can drive other apps; the remaining step is the UniFFI callback that injects it into
-   the Rust tool registry, so the agent's `ui_*` tools drive the real Mac (today they run against
-   `MockComputerController` at the Rust layer).
+1. **Vision for computer use.** Computer use drives the Mac from the Accessibility tree (text) +
+   CGEvent today; feeding screenshots to a vision-capable model as image content (so it can *see*
+   the screen like Claude) needs an image `ContentBlock` + provider plumbing. Text/AX works now.
 2. **Signing + notarization.** The DMG is unsigned (first launch needs *System Settings → Privacy
    & Security → Open Anyway*). Notarization needs an Apple Developer ID.
 3. **Connectivity beyond loopback.** mDNS discovery, the QUIC/Noise transport, the tunnel
