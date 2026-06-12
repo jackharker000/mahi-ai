@@ -22,7 +22,10 @@ mahi-data.workspace = true
 # Real hosted providers (Anthropic/OpenAI-compatible) and the managed local
 # llama.cpp runtime are both linked into the app via this FFI.
 mahi-compute = { workspace = true, features = ["hosted", "local-llm"] }
-mahi-tooling.workspace = true
+# `net` links the real HTTP paths of the `web_fetch` / `web_search` tools so
+# the app can actually browse; without it those tools report "built without
+# net" and are unusable.
+mahi-tooling = { workspace = true, features = ["net"] }
 async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }

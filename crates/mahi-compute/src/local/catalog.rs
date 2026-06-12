@@ -208,6 +208,9 @@ pub fn catalog_descriptor(entry: &CatalogEntry) -> ModelDescriptor {
             // is checked against this via `CapabilitySet::satisfied_by`.
             min_context_window: entry.context_window,
             code_gen: true,
+            // The local catalog doesn't track a per-model reasoning toggle yet;
+            // thinking is a soft request hint, so leaving this false is safe.
+            thinking: false,
         },
         limitations,
         size_bytes: Some(entry.size_bytes),

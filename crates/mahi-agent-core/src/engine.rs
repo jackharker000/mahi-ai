@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::StreamExt;
 use mahi_contracts::agent::AgentEvent;
 use mahi_contracts::compute::{
-    FinishReason, InferenceProvider, InferenceRequest, InferenceStream, ToolSpec,
+    FinishReason, InferenceProvider, InferenceRequest, InferenceStream, ThinkingConfig, ToolSpec,
 };
 use mahi_contracts::data::{
     AuditActor, AuditEvent, AuditEventType, AuditOutcome, ContentBlock, Conversation, DataStore,
@@ -27,6 +27,10 @@ use uuid::Uuid;
 
 /// Maximum number of inference→tool rounds in a single turn (multi-step cap).
 const MAX_TOOL_STEPS: usize = 8;
+/// Token cap requested per inference round. Generous enough to leave room for
+/// an extended-thinking budget plus a full answer; providers clamp to their own
+/// limits and the on-device stand-in ignores it.
+const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// How many recent messages to load from the store per round (pre-compaction).
 const HISTORY_LIMIT: usize = 200;
 /// How many memory records to recall per turn.
@@ -452,12 +456,16 @@ impl TurnRunner {
             request_id: Uuid::new_v4(),
             messages,
             tools: if specs.is_empty() { None } else { Some(specs) },
-            max_tokens: None,
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
             temperature: None,
             streaming_hint: true,
             // TODO(contracts): derive required_caps from the request (vision
             // blocks, tool presence) once content carries richer media types.
             required_caps: CapabilitySet::none(),
+            // Ask for extended thinking by default so capable models can reason
+            // through longer, multi-step tasks; providers without a thinking
+            // mode ignore it.
+            thinking: Some(ThinkingConfig::enabled()),
         }
     }
 

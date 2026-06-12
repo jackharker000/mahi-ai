@@ -174,7 +174,20 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if !system_parts.is_empty() {
         body["system"] = system_parts.join("\n").into();
     }
-    if let Some(temperature) = req.temperature {
+    if let Some(thinking) = &req.thinking {
+        // Extended thinking lets the model deliberate before answering. The
+        // Messages API requires `max_tokens > budget_tokens`, so grow the cap
+        // to leave room for both the reasoning and the visible answer.
+        let budget = thinking.budget_tokens.max(1024);
+        let max = req
+            .max_tokens
+            .unwrap_or(DEFAULT_MAX_TOKENS)
+            .max(budget.saturating_add(DEFAULT_MAX_TOKENS));
+        body["max_tokens"] = max.into();
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        // Extended thinking requires the default temperature; only set an
+        // explicit temperature when thinking is off.
+    } else if let Some(temperature) = req.temperature {
         body["temperature"] = temperature.into();
     }
     if let Some(tools) = &req.tools {
@@ -370,6 +383,7 @@ impl InferenceProvider for AnthropicProvider {
                 tool_calling: true,
                 min_context_window: 200_000,
                 code_gen: true,
+                thinking: true,
             },
             limitations: Vec::new(),
             size_bytes: None,
@@ -611,6 +625,37 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn thinking_enables_block_grows_max_tokens_and_drops_temperature() {
+        use mahi_contracts::compute::ThinkingConfig;
+        let mut req = sample_request();
+        req.temperature = Some(0.2);
+        req.max_tokens = Some(1024);
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        let body = request_body("claude-fable-5", &req);
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        // max_tokens must exceed the budget; the headroom rule grows it.
+        assert!(body["max_tokens"].as_u64().unwrap() > 4096);
+        // Extended thinking requires the default temperature.
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted when thinking is on: {body}"
+        );
+    }
+
+    #[test]
+    fn no_thinking_keeps_temperature_and_max_tokens() {
+        let mut req = sample_request();
+        req.temperature = Some(0.3);
+        req.max_tokens = Some(512);
+        let body = request_body("claude-fable-5", &req);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 512);
+        assert!((body["temperature"].as_f64().unwrap() - 0.3).abs() < 1e-6);
     }
 
     #[test]

@@ -53,6 +53,7 @@ impl InferenceProvider for MockInferenceProvider {
                 tool_calling: false,
                 min_context_window: 0,
                 code_gen: false,
+                thinking: false,
             },
             limitations: vec![
                 LimitationLabel::NoComplexCodeGen,

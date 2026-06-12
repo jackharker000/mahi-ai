@@ -194,6 +194,12 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if let Some(temperature) = req.temperature {
         body["temperature"] = temperature.into();
     }
+    if let Some(thinking) = &req.thinking {
+        // OpenAI-compatible reasoning endpoints (o-series, vLLM, Ollama's
+        // thinking models) accept a coarse `reasoning_effort` tier rather than
+        // a token budget; map the budget onto low/medium/high.
+        body["reasoning_effort"] = thinking.reasoning_effort().into();
+    }
     if let Some(tools) = &req.tools {
         body["tools"] = tools
             .iter()
@@ -366,6 +372,7 @@ impl InferenceProvider for OpenAiCompatProvider {
                 tool_calling: true,
                 min_context_window: 128_000,
                 code_gen: true,
+                thinking: true,
             },
             limitations: Vec::new(),
             size_bytes: None,
@@ -604,6 +611,26 @@ mod tests {
         let msg = &body["messages"][0];
         assert!(msg["content"].is_null());
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "ping");
+    }
+
+    #[test]
+    fn thinking_maps_to_reasoning_effort_tier() {
+        use mahi_contracts::compute::ThinkingConfig;
+        let mut req = sample_request();
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        assert_eq!(request_body("m", &req)["reasoning_effort"], "medium");
+
+        req.thinking = Some(ThinkingConfig::with_budget(1024));
+        assert_eq!(request_body("m", &req)["reasoning_effort"], "low");
+
+        req.thinking = Some(ThinkingConfig::with_budget(16_000));
+        assert_eq!(request_body("m", &req)["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn no_thinking_omits_reasoning_effort() {
+        let req = sample_request();
+        assert!(request_body("m", &req).get("reasoning_effort").is_none());
     }
 
     #[test]
