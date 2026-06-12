@@ -53,6 +53,15 @@ pub struct AssistantReply {
     pub text: String,
 }
 
+/// One persisted message, flattened for the UI transcript.
+#[derive(uniffi::Record)]
+pub struct MessageSummary {
+    pub id: String,
+    pub role: String,
+    pub text: String,
+    pub sequence_num: i64,
+}
+
 /// The handle the Swift app holds. Owns the engine and its async runtime.
 #[derive(uniffi::Object)]
 pub struct MahiEngineHandle {
@@ -140,6 +149,24 @@ impl MahiEngineHandle {
                 id: c.id.to_string(),
                 title: c.title.unwrap_or_else(|| "New conversation".to_string()),
                 mode: format!("{:?}", c.mode_at_creation),
+            })
+            .collect())
+    }
+
+    /// The persisted transcript of a conversation, in order.
+    pub fn history(&self, conversation_id: String) -> Result<Vec<MessageSummary>, MahiError> {
+        let conv = Uuid::parse_str(&conversation_id).map_err(MahiError::from)?;
+        let msgs = self
+            .rt
+            .block_on(self.engine.history(conv))
+            .map_err(MahiError::from)?;
+        Ok(msgs
+            .into_iter()
+            .map(|m| MessageSummary {
+                id: m.id.to_string(),
+                role: format!("{:?}", m.role).to_lowercase(),
+                text: m.text_content(),
+                sequence_num: m.sequence_num,
             })
             .collect())
     }

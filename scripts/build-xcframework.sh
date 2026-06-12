@@ -176,9 +176,27 @@ mkdir -p "$FRAMEWORKS_DIR"
 rm -rf "$XCFRAMEWORK"
 xcodebuild -create-xcframework "${CREATE_ARGS[@]}" -output "$XCFRAMEWORK"
 
+# ---------------------------------------------------------------------------
+step "Installing into the MahiKit SwiftPM layout"
+# ---------------------------------------------------------------------------
+
+# Package.swift attaches the real core only when BOTH of these exist:
+#   macos/MahiKit/Artifacts/MahiFFI.xcframework   (binary target)
+#   macos/MahiKit/Sources/Mahi/Mahi.swift         (generated bindings target)
+PKG_ARTIFACTS="$REPO_ROOT/macos/MahiKit/Artifacts"
+PKG_BINDINGS_DIR="$REPO_ROOT/macos/MahiKit/Sources/Mahi"
+
+rm -rf "$PKG_ARTIFACTS/MahiFFI.xcframework"
+mkdir -p "$PKG_ARTIFACTS" "$PKG_BINDINGS_DIR"
+cp -R "$XCFRAMEWORK" "$PKG_ARTIFACTS/MahiFFI.xcframework"
+
+SWIFT_BINDING="$(ls "$GENERATED_DIR"/*.swift | head -1)"
+[[ -n "$SWIFT_BINDING" ]] || die "No generated .swift binding found in $GENERATED_DIR"
+cp "$SWIFT_BINDING" "$PKG_BINDINGS_DIR/Mahi.swift"
+
 step "Done"
-echo "  Swift bindings : $GENERATED_DIR"
-echo "  XCFramework    : $XCFRAMEWORK"
+echo "  Swift bindings : $PKG_BINDINGS_DIR/Mahi.swift"
+echo "  XCFramework    : $PKG_ARTIFACTS/MahiFFI.xcframework"
 [[ -n "$BUILT_IOS" ]]  || warn "iOS slice missing (target not installed)."
 [[ -n "$MACOS_LIB" ]]  || warn "macOS slice missing (targets not installed)."
 echo "Next: cd macos && xcodegen generate && open Mahi.xcodeproj"

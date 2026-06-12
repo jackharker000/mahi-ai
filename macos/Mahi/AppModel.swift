@@ -27,7 +27,7 @@ public final class AppModel: ObservableObject {
     private let engine: any MahiEngineProtocol
     private var turnTask: Task<Void, Never>?
 
-    public init(engine: any MahiEngineProtocol = PreviewMockEngine(seeded: true)) {
+    public init(engine: any MahiEngineProtocol = EngineFactory.makeDefault()) {
         self.engine = engine
     }
 
