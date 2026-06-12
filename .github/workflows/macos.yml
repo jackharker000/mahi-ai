@@ -40,7 +40,11 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: macos
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          # XcodeGen 2.45 stamps the Xcode-16 project format (objectVersion 77);
+          # rewrite it to 56 so the runner's Xcode 15.4 can open the project.
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' Mahi.xcodeproj/project.pbxproj
 
       - name: Build Mahi scheme (signing disabled)
         working-directory: macos
