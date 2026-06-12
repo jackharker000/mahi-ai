@@ -1,30 +1,63 @@
 //! # mahi-ffi
 //!
-//! UniFFI bindings exposing the Mahi core to the Swift macOS/iOS app (and,
-//! later, Kotlin on Android). The Swift bindings module (`Mahi`) is generated
-//! from this crate by `scripts/build-xcframework.sh`.
+//! UniFFI bindings exposing the Mahi core to the Swift macOS/iOS app. The
+//! generated Swift module (`Mahi`) is produced from this crate by
+//! `scripts/build-xcframework.sh`.
 //!
-//! Phase 0 exposes a small, blocking facade — `MahiEngineHandle` — that the
-//! app calls from a background task: build an engine, create a conversation,
-//! send a message and get the assistant's full reply, and list conversations.
-//! Token-level streaming is a follow-up (the engine already streams natively;
-//! the FFI will expose it via a polling handle).
+//! [`MahiEngineHandle`] is the app's single entry point. It owns the agent
+//! engine, an async runtime, the managed local-model runtime + download
+//! manager, and a runtime-swappable inference provider so the app can:
+//!
+//! - download and run **local** GGUF models (mode A, Ollama-style and fully
+//!   app-managed via `llama-server`),
+//! - point chat at a **hosted** Anthropic / OpenAI-compatible model,
+//! - stream turns token-by-token with tool use + approvals ([`TurnHandle`]),
+//! - spawn parallel subagents.
+//!
+//! ## The MacLan execution model
+//!
+//! On the Mac, the Mac itself is the brain that executes tools, so every turn
+//! runs in [`ComputeMode::MacLan`] and the [`SwappableProvider`] stamps that
+//! mode on every chunk regardless of which model answers. That keeps the full
+//! local toolset (files, shell, web, computer use, MCP) available no matter
+//! whether a local or hosted model is active — the model's *identity* is shown
+//! separately via [`MahiEngineHandle::runtime_status`].
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use mahi_agent_core::{EngineConfig, MahiEngine};
-use mahi_compute::{InferenceRouter, OnDeviceProvider};
+use mahi_compute::local::catalog::find_entry;
+use mahi_compute::local::{DownloadHandle, DownloadStatus, RunningServer};
+use mahi_compute::{
+    model_catalog, AnthropicProvider, LlamaRuntime, LocalLlamaProvider, ModelManager,
+    OpenAiCompatProvider,
+};
 use mahi_contracts::agent::AgentEvent;
-use mahi_contracts::compute::InferenceProvider;
-use mahi_contracts::tooling::ToolInvokeContract;
-use mahi_contracts::types::ComputeMode;
+use mahi_contracts::compute::{
+    CanHandleResult, FinishReason, InferenceChunk, InferenceProvider, InferenceRequest,
+    InferenceStream,
+};
+use mahi_contracts::tooling::ToolEvent;
+use mahi_contracts::types::{
+    CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile,
+};
 use mahi_tooling::{MockComputerController, ToolRegistry};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::runtime::Runtime;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
+
+/// Largest context window we ask `llama-server` to allocate (bounds memory on
+/// small Macs; long-context models still load, just with an 8K window).
+const MAX_LOCAL_CONTEXT: u32 = 8192;
+
+/// The active local model: `(model_id, its provider)`.
+type LocalSlot = (String, Arc<dyn InferenceProvider>);
 
 /// Errors surfaced across the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -38,6 +71,8 @@ impl MahiError {
         MahiError::Engine(e.to_string())
     }
 }
+
+// ───────────────────────────── FFI value types ─────────────────────────────
 
 /// A conversation as shown in the app's sidebar.
 #[derive(uniffi::Record)]
@@ -62,62 +97,479 @@ pub struct MessageSummary {
     pub sequence_num: i64,
 }
 
+/// Install/run state of one catalog model on this machine.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ModelStateFfi {
+    NotInstalled,
+    Downloading {
+        progress: f64,
+        bytes_downloaded: u64,
+    },
+    Installed,
+    Active,
+}
+
+/// One catalog model plus its current state, for the Models screen.
+#[derive(uniffi::Record)]
+pub struct CatalogModelFfi {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub size_bytes: u64,
+    pub quantization: String,
+    pub context_window: u32,
+    pub tool_calling: bool,
+    pub description: String,
+    pub state: ModelStateFfi,
+}
+
+/// State of the managed local runtime / active model.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum RuntimeStatusFfi {
+    NoModel,
+    PreparingRuntime,
+    Starting { model_id: String },
+    Running { model_id: String },
+    Failed { message: String },
+}
+
+/// Hosted-provider configuration sent from Settings.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HostedConfigFfi {
+    /// `"anthropic"` or `"openai"`.
+    pub provider: String,
+    pub api_key: String,
+    pub model: String,
+    pub base_url: Option<String>,
+}
+
+/// One streamed agent event, flattened for the Swift bridge.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum AgentEventFfi {
+    TurnStarted {
+        conversation_id: String,
+        message_id: String,
+    },
+    TextDelta {
+        text: String,
+    },
+    ToolProgress {
+        text: String,
+    },
+    ToolResult {
+        output: String,
+    },
+    ToolError {
+        message: String,
+    },
+    ApprovalRequired {
+        approval_id: String,
+        summary: String,
+    },
+    TurnFinished {
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Map a core [`AgentEvent`] (or stream error) to its flattened FFI form.
+/// Returns `None` for events the UI doesn't render (e.g. mode handoffs, which
+/// never happen under the forced-MacLan model).
+fn map_event(
+    item: Result<AgentEvent, mahi_contracts::error::ContractError>,
+) -> Option<AgentEventFfi> {
+    match item {
+        Err(e) => Some(AgentEventFfi::Error {
+            message: e.to_string(),
+        }),
+        Ok(AgentEvent::TurnStarted {
+            conversation_id,
+            message_id,
+            ..
+        }) => Some(AgentEventFfi::TurnStarted {
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+        }),
+        Ok(AgentEvent::TextDelta { text }) => Some(AgentEventFfi::TextDelta { text }),
+        Ok(AgentEvent::Tool { event }) => match event {
+            ToolEvent::Result { output, .. } => Some(AgentEventFfi::ToolResult {
+                output: render_tool_output(&output),
+            }),
+            ToolEvent::Error { message, .. } => Some(AgentEventFfi::ToolError { message }),
+            ToolEvent::Chunk { data } => Some(AgentEventFfi::ToolProgress { text: data }),
+            ToolEvent::Citation { url, title, .. } => Some(AgentEventFfi::ToolProgress {
+                text: format!(
+                    "{}{}",
+                    title.map(|t| format!("{t} — ")).unwrap_or_default(),
+                    url
+                ),
+            }),
+            ToolEvent::ApprovalRequired { summary, .. } => {
+                Some(AgentEventFfi::ToolProgress { text: summary })
+            }
+            ToolEvent::Cancelled => Some(AgentEventFfi::ToolProgress {
+                text: "cancelled".to_string(),
+            }),
+        },
+        Ok(AgentEvent::ApprovalRequired {
+            approval_id,
+            summary,
+        }) => Some(AgentEventFfi::ApprovalRequired {
+            approval_id: approval_id.to_string(),
+            summary,
+        }),
+        Ok(AgentEvent::TurnFinished { reason }) => Some(AgentEventFfi::TurnFinished {
+            reason: format!("{reason:?}"),
+        }),
+        Ok(AgentEvent::Error { message }) => Some(AgentEventFfi::Error { message }),
+        Ok(AgentEvent::ModeHandoff { .. }) => None,
+    }
+}
+
+fn render_tool_output(output: &serde_json::Value) -> String {
+    match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => {
+            // Common tool result shapes carry their payload under "content".
+            if let Some(serde_json::Value::String(s)) = map.get("content") {
+                s.clone()
+            } else {
+                output.to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+// ──────────────────────── Inference provider plumbing ───────────────────────
+
+/// The engine's inference provider: forwards to whichever real provider is
+/// active (local / hosted / placeholder) and stamps every chunk with
+/// `forced_mode` so the agent loop's tool gating stays stable across models.
+struct SwappableProvider {
+    forced_mode: ComputeMode,
+    current: RwLock<Arc<dyn InferenceProvider>>,
+}
+
+impl SwappableProvider {
+    fn new(forced_mode: ComputeMode, initial: Arc<dyn InferenceProvider>) -> Self {
+        Self {
+            forced_mode,
+            current: RwLock::new(initial),
+        }
+    }
+
+    fn swap(&self, provider: Arc<dyn InferenceProvider>) {
+        *self.current.write().expect("provider lock poisoned") = provider;
+    }
+
+    fn current(&self) -> Arc<dyn InferenceProvider> {
+        self.current.read().expect("provider lock poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl InferenceProvider for SwappableProvider {
+    fn descriptor(&self) -> ModelDescriptor {
+        self.current().descriptor()
+    }
+
+    async fn can_handle(&self, req: &InferenceRequest) -> CanHandleResult {
+        self.current().can_handle(req).await
+    }
+
+    async fn generate(
+        &self,
+        req: InferenceRequest,
+        cancel: CancellationToken,
+    ) -> Result<InferenceStream, mahi_contracts::error::ContractError> {
+        let inner = self.current(); // clone Arc, release the lock before awaiting
+        let stream = inner.generate(req, cancel).await?;
+        let mode = self.forced_mode;
+        Ok(Box::pin(stream.map(move |item| {
+            item.map(|mut chunk| {
+                chunk.active_mode = mode;
+                chunk
+            })
+        })))
+    }
+}
+
+/// The provider used before any model is configured: streams a friendly
+/// "set up a model" message instead of failing.
+struct PlaceholderProvider;
+
+#[async_trait]
+impl InferenceProvider for PlaceholderProvider {
+    fn descriptor(&self) -> ModelDescriptor {
+        ModelDescriptor {
+            id: "none".to_string(),
+            display_name: "No model".to_string(),
+            context_window: 0,
+            capabilities: CapabilitySet::none(),
+            limitations: Vec::new(),
+            size_bytes: None,
+            quantization: None,
+            source: ModelSource::OnDevice,
+            perf_profile: PerfProfile::default(),
+        }
+    }
+
+    async fn can_handle(&self, _req: &InferenceRequest) -> CanHandleResult {
+        CanHandleResult::capable()
+    }
+
+    async fn generate(
+        &self,
+        _req: InferenceRequest,
+        _cancel: CancellationToken,
+    ) -> Result<InferenceStream, mahi_contracts::error::ContractError> {
+        let msg = "No model is loaded yet. Open the Models tab to download and run a \
+                   local model, or add a hosted API key in Settings.";
+        let chunks = vec![
+            Ok(InferenceChunk::text(msg, ComputeMode::MacLan)),
+            Ok(InferenceChunk::finish(
+                FinishReason::Stop,
+                ComputeMode::MacLan,
+            )),
+        ];
+        Ok(Box::pin(futures::stream::iter(chunks)))
+    }
+}
+
+// ─────────────────────────── Streaming turn handle ──────────────────────────
+
+/// A bounded queue of turn events, drained by [`TurnHandle::poll_batch`].
+struct TurnQueue {
+    inner: Mutex<TurnQueueInner>,
+    notify: Notify,
+}
+
+struct TurnQueueInner {
+    events: VecDeque<AgentEventFfi>,
+    finished: bool,
+}
+
+impl TurnQueue {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(TurnQueueInner {
+                events: VecDeque::new(),
+                finished: false,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    fn push(&self, event: AgentEventFfi) {
+        self.inner
+            .lock()
+            .expect("turn queue poisoned")
+            .events
+            .push_back(event);
+        self.notify.notify_one();
+    }
+
+    fn finish(&self) {
+        self.inner.lock().expect("turn queue poisoned").finished = true;
+        self.notify.notify_one();
+    }
+
+    /// Suspend until at least one event is available, then drain up to `max`.
+    /// Returns an empty vec exactly when the turn has finished and drained.
+    async fn next_batch(&self, max: usize) -> Vec<AgentEventFfi> {
+        loop {
+            {
+                let mut guard = self.inner.lock().expect("turn queue poisoned");
+                if !guard.events.is_empty() {
+                    let take = guard.events.len().min(max);
+                    return guard.events.drain(..take).collect();
+                }
+                if guard.finished {
+                    return Vec::new();
+                }
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
+/// A handle on one in-flight agent turn (mirror of the Swift
+/// `TurnHandleProtocol`): poll batches of events, or cancel.
+#[derive(uniffi::Object)]
+pub struct TurnHandle {
+    queue: Arc<TurnQueue>,
+    cancel: CancellationToken,
+    rt: tokio::runtime::Handle,
+}
+
+#[uniffi::export]
+impl TurnHandle {
+    /// Block until at least one event is ready and return up to `max_events`.
+    /// Returns an empty list exactly once, after the turn's stream has ended.
+    pub fn poll_batch(&self, max_events: u32) -> Vec<AgentEventFfi> {
+        let max = (max_events.max(1)) as usize;
+        self.rt.block_on(self.queue.next_batch(max))
+    }
+
+    /// Request cancellation of the underlying turn.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+// ───────────────────────────── Engine handle ────────────────────────────────
+
+/// Mutable runtime state behind the engine (models, downloads, hosted config).
+struct EngineState {
+    manager: Arc<ModelManager>,
+    runtime: Arc<LlamaRuntime>,
+    running: Arc<Mutex<Option<RunningServer>>>,
+    status: Arc<Mutex<RuntimeStatusFfi>>,
+    downloads: Mutex<HashMap<String, DownloadHandle>>,
+    hosted: Mutex<Option<HostedConfigFfi>>,
+    /// The active local model `(id, provider)`, kept so we can revert to it
+    /// when hosted config is cleared. Shared (`Arc`) so the activation task can
+    /// publish into it.
+    local: Arc<Mutex<Option<LocalSlot>>>,
+}
+
 /// The handle the Swift app holds. Owns the engine and its async runtime.
 #[derive(uniffi::Object)]
 pub struct MahiEngineHandle {
     engine: MahiEngine,
+    provider: Arc<SwappableProvider>,
+    state: EngineState,
     rt: Runtime,
 }
 
 impl MahiEngineHandle {
     fn build(data_dir: Option<String>) -> Result<Arc<Self>, MahiError> {
         let rt = Runtime::new().map_err(MahiError::from)?;
-        let data = match data_dir {
-            Some(dir) => mahi_data::open_store(&PathBuf::from(dir)).map_err(MahiError::from)?,
-            None => mahi_data::open_in_memory().map_err(MahiError::from)?,
+        let (data, base_dir) = match data_dir {
+            Some(dir) => {
+                let path = PathBuf::from(&dir);
+                (
+                    mahi_data::open_store(&path).map_err(MahiError::from)?,
+                    Some(path),
+                )
+            }
+            None => (mahi_data::open_in_memory().map_err(MahiError::from)?, None),
         };
-        let inference: Arc<dyn InferenceProvider> = Arc::new(
-            InferenceRouter::builder()
-                .add_provider(ComputeMode::OnDevice, Arc::new(OnDeviceProvider::new()))
-                .build(),
-        );
-        let tools: Arc<dyn ToolInvokeContract> = Arc::new(ToolRegistry::with_builtins(Arc::new(
-            MockComputerController::new(),
-        )));
+
+        // Models + the llama runtime live under the data dir (or a temp dir for
+        // the in-memory/preview engine).
+        let base_dir = base_dir.unwrap_or_else(std::env::temp_dir);
+        let manager = Arc::new(ModelManager::new(base_dir.join("models")));
+        let runtime = Arc::new(LlamaRuntime::new(base_dir.join("runtime")));
+
+        let provider = Arc::new(SwappableProvider::new(
+            ComputeMode::MacLan,
+            Arc::new(PlaceholderProvider),
+        ));
+        let inference: Arc<dyn InferenceProvider> = provider.clone();
+
+        // Scope file/shell tools to the user's home so the coding agent can
+        // work across the user's files (writes/shell are approval-gated).
+        let workspace = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_dir.clone());
+        let tools = Arc::new(ToolRegistry::with_builtins_scoped(
+            Arc::new(MockComputerController::new()),
+            workspace,
+        ));
+
         let engine = MahiEngine::new(EngineConfig {
             data,
             inference,
             tools,
             device_id: Uuid::new_v4(),
         });
-        Ok(Arc::new(Self { engine, rt }))
+
+        Ok(Arc::new(Self {
+            engine,
+            provider,
+            state: EngineState {
+                manager,
+                runtime,
+                running: Arc::new(Mutex::new(None)),
+                status: Arc::new(Mutex::new(RuntimeStatusFfi::NoModel)),
+                downloads: Mutex::new(HashMap::new()),
+                hosted: Mutex::new(None),
+                local: Arc::new(Mutex::new(None)),
+            },
+            rt,
+        }))
+    }
+
+    fn set_status(&self, status: RuntimeStatusFfi) {
+        *self.state.status.lock().expect("status lock poisoned") = status;
     }
 }
 
 #[uniffi::export]
 impl MahiEngineHandle {
-    /// An ephemeral in-memory engine (on-device model + built-in tools).
+    /// An ephemeral in-memory engine (preview/testing).
     #[uniffi::constructor]
     pub fn in_memory() -> Result<Arc<Self>, MahiError> {
         Self::build(None)
     }
 
-    /// An engine persisting to the encrypted store under `data_dir`.
+    /// An engine persisting to the encrypted store under `data_dir`; models and
+    /// the local runtime are stored alongside it.
     #[uniffi::constructor]
     pub fn with_store(data_dir: String) -> Result<Arc<Self>, MahiError> {
         Self::build(Some(data_dir))
     }
 
-    /// Start a new conversation; returns its id.
+    /// Start a new conversation; returns its id. Runs in MacLan (see module docs).
     pub fn create_conversation(&self) -> Result<String, MahiError> {
         let id = self
             .rt
-            .block_on(self.engine.create_conversation(ComputeMode::OnDevice))
+            .block_on(self.engine.create_conversation(ComputeMode::MacLan))
             .map_err(MahiError::from)?;
         Ok(id.to_string())
     }
 
-    /// Send `text` in `conversation_id`; returns the assistant's full reply.
+    /// Start a streaming turn; poll the returned [`TurnHandle`] for events.
+    pub fn start_turn(
+        &self,
+        conversation_id: String,
+        text: String,
+    ) -> Result<Arc<TurnHandle>, MahiError> {
+        let conv = Uuid::parse_str(&conversation_id).map_err(MahiError::from)?;
+        let queue = Arc::new(TurnQueue::new());
+        let cancel = CancellationToken::new();
+
+        let engine = self.engine.clone();
+        let task_queue = Arc::clone(&queue);
+        let task_cancel = cancel.clone();
+        self.rt.spawn(async move {
+            match engine.run_turn(conv, text, task_cancel).await {
+                Ok(mut stream) => {
+                    while let Some(item) = stream.next().await {
+                        if let Some(event) = map_event(item) {
+                            task_queue.push(event);
+                        }
+                    }
+                }
+                Err(e) => task_queue.push(AgentEventFfi::Error {
+                    message: e.to_string(),
+                }),
+            }
+            task_queue.finish();
+        });
+
+        Ok(Arc::new(TurnHandle {
+            queue,
+            cancel,
+            rt: self.rt.handle().clone(),
+        }))
+    }
+
+    /// Send `text` and return the assistant's full reply (buffered convenience).
     pub fn send(&self, conversation_id: String, text: String) -> Result<AssistantReply, MahiError> {
         let conv = Uuid::parse_str(&conversation_id).map_err(MahiError::from)?;
         let reply = self.rt.block_on(async {
@@ -135,6 +587,14 @@ impl MahiEngineHandle {
             Ok::<String, MahiError>(out)
         })?;
         Ok(AssistantReply { text: reply })
+    }
+
+    /// Respond to a pending approval (id from `AgentEventFfi::ApprovalRequired`).
+    pub fn resolve_approval(&self, approval_id: String, approved: bool) -> Result<(), MahiError> {
+        let id = Uuid::parse_str(&approval_id).map_err(MahiError::from)?;
+        self.rt
+            .block_on(self.engine.resolve_approval(id, approved))
+            .map_err(MahiError::from)
     }
 
     /// List recent conversations (most-recent first).
@@ -169,5 +629,220 @@ impl MahiEngineHandle {
                 sequence_num: m.sequence_num,
             })
             .collect())
+    }
+
+    /// Delegate goals to parallel subagents; returns one summary per goal.
+    pub fn spawn_subagents(&self, goals: Vec<String>) -> Result<Vec<String>, MahiError> {
+        self.rt
+            .block_on(self.engine.spawn_subagents(goals))
+            .map_err(MahiError::from)
+    }
+
+    // ───────────────────────── Model management ─────────────────────────
+
+    /// The full local-model catalog with each model's current state.
+    pub fn model_catalog(&self) -> Result<Vec<CatalogModelFfi>, MahiError> {
+        let installed = self.rt.block_on(self.state.manager.installed());
+        let installed_ids: HashSet<String> = installed.into_iter().map(|m| m.id).collect();
+        let active = self
+            .state
+            .local
+            .lock()
+            .expect("local lock poisoned")
+            .as_ref()
+            .map(|(id, _)| id.clone());
+        let downloads = self
+            .state
+            .downloads
+            .lock()
+            .expect("downloads lock poisoned");
+
+        let out = model_catalog()
+            .into_iter()
+            .map(|e| {
+                let state = if active.as_deref() == Some(e.id.as_str()) {
+                    ModelStateFfi::Active
+                } else if let Some(handle) = downloads.get(&e.id) {
+                    let dl = handle.state();
+                    match dl.status() {
+                        DownloadStatus::Downloading | DownloadStatus::Idle => {
+                            ModelStateFfi::Downloading {
+                                progress: dl.progress() as f64,
+                                bytes_downloaded: dl.bytes_downloaded(),
+                            }
+                        }
+                        DownloadStatus::Completed => ModelStateFfi::Installed,
+                        DownloadStatus::Failed(_) => ModelStateFfi::NotInstalled,
+                    }
+                } else if installed_ids.contains(&e.id) {
+                    ModelStateFfi::Installed
+                } else {
+                    ModelStateFfi::NotInstalled
+                };
+                CatalogModelFfi {
+                    id: e.id,
+                    display_name: e.display_name,
+                    family: e.family,
+                    size_bytes: e.size_bytes,
+                    quantization: e.quantization,
+                    context_window: e.context_window,
+                    tool_calling: e.tool_calling,
+                    description: e.description,
+                    state,
+                }
+            })
+            .collect();
+        Ok(out)
+    }
+
+    /// Begin downloading a catalog model in the background.
+    pub fn start_download(&self, model_id: String) -> Result<(), MahiError> {
+        let entry = find_entry(&model_id)
+            .ok_or_else(|| MahiError::Engine(format!("unknown model `{model_id}`")))?;
+        let handle = self.rt.block_on(self.state.manager.start_download(&entry));
+        self.state
+            .downloads
+            .lock()
+            .expect("downloads lock poisoned")
+            .insert(model_id, handle);
+        Ok(())
+    }
+
+    /// Cancel an in-flight download (keeps the partial file for resume).
+    pub fn cancel_download(&self, model_id: String) -> Result<(), MahiError> {
+        if let Some(handle) = self
+            .state
+            .downloads
+            .lock()
+            .expect("downloads lock poisoned")
+            .get(&model_id)
+        {
+            handle.cancel();
+        }
+        Ok(())
+    }
+
+    /// Delete an installed model (and stop it if it's the active one).
+    pub fn delete_model(&self, model_id: String) -> Result<(), MahiError> {
+        {
+            let mut local = self.state.local.lock().expect("local lock poisoned");
+            if local.as_ref().map(|(id, _)| id.as_str()) == Some(model_id.as_str()) {
+                *local = None;
+                *self.state.running.lock().expect("running lock poisoned") = None;
+                self.provider.swap(Arc::new(PlaceholderProvider));
+                self.set_status(RuntimeStatusFfi::NoModel);
+            }
+        }
+        self.state
+            .downloads
+            .lock()
+            .expect("downloads lock poisoned")
+            .remove(&model_id);
+        self.rt
+            .block_on(self.state.manager.delete(&model_id))
+            .map_err(MahiError::from)
+    }
+
+    /// Load a downloaded model into the managed runtime (non-blocking: poll
+    /// [`Self::runtime_status`] for progress, which can take ~a minute).
+    pub fn activate_model(&self, model_id: String) -> Result<(), MahiError> {
+        let entry = find_entry(&model_id)
+            .ok_or_else(|| MahiError::Engine(format!("unknown model `{model_id}`")))?;
+        let path = self.state.manager.model_path(&model_id);
+        if !path.is_file() {
+            return Err(MahiError::Engine(format!(
+                "model `{model_id}` is not downloaded"
+            )));
+        }
+        let ctx = entry.context_window.min(MAX_LOCAL_CONTEXT);
+        self.set_status(RuntimeStatusFfi::Starting {
+            model_id: model_id.clone(),
+        });
+
+        let runtime = Arc::clone(&self.state.runtime);
+        let provider = Arc::clone(&self.provider);
+        let running = Arc::clone(&self.state.running);
+        let status = Arc::clone(&self.state.status);
+        let local = Arc::clone(&self.state.local);
+        self.rt.spawn(async move {
+            match runtime.start(&path, ctx).await {
+                Ok(server) => {
+                    let local_provider: Arc<dyn InferenceProvider> =
+                        Arc::new(LocalLlamaProvider::new(server.base_url(), &entry));
+                    provider.swap(Arc::clone(&local_provider));
+                    *running.lock().expect("running lock poisoned") = Some(server);
+                    *local.lock().expect("local lock poisoned") =
+                        Some((model_id.clone(), local_provider));
+                    *status.lock().expect("status lock poisoned") =
+                        RuntimeStatusFfi::Running { model_id };
+                }
+                Err(e) => {
+                    *status.lock().expect("status lock poisoned") = RuntimeStatusFfi::Failed {
+                        message: e.to_string(),
+                    };
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// The current runtime/active-model status.
+    pub fn runtime_status(&self) -> RuntimeStatusFfi {
+        self.state
+            .status
+            .lock()
+            .expect("status lock poisoned")
+            .clone()
+    }
+
+    /// Point inference at a hosted provider, or clear it (`None`) to fall back
+    /// to the active local model (or the placeholder if none).
+    pub fn set_hosted_config(&self, config: Option<HostedConfigFfi>) -> Result<(), MahiError> {
+        match config {
+            Some(cfg) => {
+                let provider: Arc<dyn InferenceProvider> = match cfg.provider.as_str() {
+                    "anthropic" => Arc::new(AnthropicProvider::with_model(
+                        cfg.api_key.clone(),
+                        cfg.model.clone(),
+                    )),
+                    _ => {
+                        let base = cfg
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| "https://api.openai.com".to_string());
+                        Arc::new(OpenAiCompatProvider::new(
+                            base,
+                            cfg.api_key.clone(),
+                            cfg.model.clone(),
+                        ))
+                    }
+                };
+                self.provider.swap(provider);
+                self.set_status(RuntimeStatusFfi::Running {
+                    model_id: cfg.model.clone(),
+                });
+                *self.state.hosted.lock().expect("hosted lock poisoned") = Some(cfg);
+            }
+            None => {
+                *self.state.hosted.lock().expect("hosted lock poisoned") = None;
+                let local = self
+                    .state
+                    .local
+                    .lock()
+                    .expect("local lock poisoned")
+                    .clone();
+                match local {
+                    Some((id, provider)) => {
+                        self.provider.swap(provider);
+                        self.set_status(RuntimeStatusFfi::Running { model_id: id });
+                    }
+                    None => {
+                        self.provider.swap(Arc::new(PlaceholderProvider));
+                        self.set_status(RuntimeStatusFfi::NoModel);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

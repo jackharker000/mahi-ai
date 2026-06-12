@@ -1332,12 +1332,14 @@ dependencies = [
 name = "mahi-ffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures",
  "mahi-agent-core",
  "mahi-compute",
  "mahi-contracts",
  "mahi-data",
  "mahi-tooling",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
