@@ -23,10 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install stable toolchain (Apple targets)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios
+      # rust-toolchain.toml pins the toolchain; `rustup show` installs it for this
+      # checkout, then the Apple targets are added to THAT toolchain (a plain
+      # toolchain action would install targets for a different, unpinned one,
+      # leaving the x86_64 slice silently missing from the xcframework).
+      - name: Install pinned toolchain + Apple targets
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
