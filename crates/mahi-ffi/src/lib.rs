@@ -37,11 +37,15 @@ use mahi_contracts::compute::{
     CanHandleResult, FinishReason, InferenceChunk, InferenceProvider, InferenceRequest,
     InferenceStream,
 };
+use mahi_contracts::error::ContractError;
 use mahi_contracts::tooling::ToolEvent;
 use mahi_contracts::types::{
     CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile,
 };
-use mahi_tooling::{MockComputerController, ToolRegistry};
+use mahi_tooling::{
+    ComputerController, MockComputerController, MouseButton, Screenshot, ToolRegistry, UiBounds,
+    UiElement,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -339,6 +343,134 @@ impl InferenceProvider for PlaceholderProvider {
     }
 }
 
+// ───────────────────────── Computer-use host bridge ─────────────────────────
+
+/// A captured screen frame handed across the FFI from the Swift controller.
+#[derive(uniffi::Record)]
+pub struct ScreenshotFfi {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One UI element the Swift Accessibility walk discovered.
+#[derive(uniffi::Record)]
+pub struct UiElementFfi {
+    pub role: String,
+    pub label: Option<String>,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub focused: bool,
+}
+
+/// The host's computer-use surface, implemented in Swift by
+/// `MahiComputerController`. Calls are synchronous across the boundary; the
+/// Rust adapter runs them on a blocking thread so the async agent loop is never
+/// stalled, and maps each failure to a recoverable tool error.
+#[uniffi::export(callback_interface)]
+pub trait ComputerUseHost: Send + Sync {
+    fn screenshot(&self) -> Result<ScreenshotFfi, MahiError>;
+    fn describe_ui(&self) -> Result<Vec<UiElementFfi>, MahiError>;
+    fn click(&self, x: i32, y: i32, button: String) -> Result<(), MahiError>;
+    fn move_mouse(&self, x: i32, y: i32) -> Result<(), MahiError>;
+    fn type_text(&self, text: String) -> Result<(), MahiError>;
+    fn scroll(&self, dx: i32, dy: i32) -> Result<(), MahiError>;
+    fn key(&self, combo: String) -> Result<(), MahiError>;
+    fn is_sensitive_context(&self) -> bool;
+}
+
+fn mouse_button_str(button: MouseButton) -> String {
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+    }
+    .to_string()
+}
+
+/// Adapts a foreign [`ComputerUseHost`] to the tooling [`ComputerController`],
+/// running each blocking host call off the async agent loop.
+struct HostComputerController {
+    host: Arc<dyn ComputerUseHost>,
+}
+
+impl HostComputerController {
+    async fn on_blocking<T, F>(&self, f: F) -> Result<T, ContractError>
+    where
+        F: FnOnce(Arc<dyn ComputerUseHost>) -> Result<T, MahiError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let host = Arc::clone(&self.host);
+        tokio::task::spawn_blocking(move || f(host))
+            .await
+            .map_err(|e| ContractError::other(format!("computer-use task failed: {e}")))?
+            .map_err(|e| ContractError::other(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl ComputerController for HostComputerController {
+    async fn screenshot(&self) -> Result<Screenshot, ContractError> {
+        let shot = self.on_blocking(|h| h.screenshot()).await?;
+        Ok(Screenshot {
+            bytes: shot.png,
+            width: shot.width,
+            height: shot.height,
+            description: String::new(),
+        })
+    }
+
+    async fn describe_ui(&self) -> Result<Vec<UiElement>, ContractError> {
+        let elements = self.on_blocking(|h| h.describe_ui()).await?;
+        Ok(elements
+            .into_iter()
+            .map(|e| UiElement {
+                role: e.role,
+                label: e.label,
+                bounds: UiBounds {
+                    x: e.x,
+                    y: e.y,
+                    width: e.width,
+                    height: e.height,
+                },
+                focused: e.focused,
+            })
+            .collect())
+    }
+
+    async fn click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), ContractError> {
+        let b = mouse_button_str(button);
+        self.on_blocking(move |h| h.click(x, y, b)).await
+    }
+
+    async fn move_mouse(&self, x: i32, y: i32) -> Result<(), ContractError> {
+        self.on_blocking(move |h| h.move_mouse(x, y)).await
+    }
+
+    async fn type_text(&self, text: &str) -> Result<(), ContractError> {
+        let text = text.to_string();
+        self.on_blocking(move |h| h.type_text(text)).await
+    }
+
+    async fn scroll(&self, dx: i32, dy: i32) -> Result<(), ContractError> {
+        self.on_blocking(move |h| h.scroll(dx, dy)).await
+    }
+
+    async fn key(&self, combo: &str) -> Result<(), ContractError> {
+        let combo = combo.to_string();
+        self.on_blocking(move |h| h.key(combo)).await
+    }
+
+    async fn is_sensitive_context(&self) -> bool {
+        let host = Arc::clone(&self.host);
+        tokio::task::spawn_blocking(move || host.is_sensitive_context())
+            .await
+            .unwrap_or(false)
+    }
+}
+
 // ─────────────────────────── Streaming turn handle ──────────────────────────
 
 /// A bounded queue of turn events, drained by [`TurnHandle::poll_batch`].
@@ -446,7 +578,10 @@ pub struct MahiEngineHandle {
 }
 
 impl MahiEngineHandle {
-    fn build(data_dir: Option<String>) -> Result<Arc<Self>, MahiError> {
+    fn build(
+        data_dir: Option<String>,
+        controller: Arc<dyn ComputerController>,
+    ) -> Result<Arc<Self>, MahiError> {
         let rt = Runtime::new().map_err(MahiError::from)?;
         let (data, base_dir) = match data_dir {
             Some(dir) => {
@@ -476,10 +611,7 @@ impl MahiEngineHandle {
         let workspace = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| base_dir.clone());
-        let tools = Arc::new(ToolRegistry::with_builtins_scoped(
-            Arc::new(MockComputerController::new()),
-            workspace,
-        ));
+        let tools = Arc::new(ToolRegistry::with_builtins_scoped(controller, workspace));
 
         let engine = MahiEngine::new(EngineConfig {
             data,
@@ -511,17 +643,31 @@ impl MahiEngineHandle {
 
 #[uniffi::export]
 impl MahiEngineHandle {
-    /// An ephemeral in-memory engine (preview/testing).
+    /// An ephemeral in-memory engine (preview/testing); computer-use tools are
+    /// mocked.
     #[uniffi::constructor]
     pub fn in_memory() -> Result<Arc<Self>, MahiError> {
-        Self::build(None)
+        Self::build(None, Arc::new(MockComputerController::new()))
     }
 
     /// An engine persisting to the encrypted store under `data_dir`; models and
-    /// the local runtime are stored alongside it.
+    /// the local runtime are stored alongside it. Computer-use tools are mocked
+    /// (use [`Self::with_store_and_computer`] to drive the real Mac).
     #[uniffi::constructor]
     pub fn with_store(data_dir: String) -> Result<Arc<Self>, MahiError> {
-        Self::build(Some(data_dir))
+        Self::build(Some(data_dir), Arc::new(MockComputerController::new()))
+    }
+
+    /// Like [`Self::with_store`], but the agent's computer-use tools drive the
+    /// real Mac through the Swift `host` (screen capture, Accessibility,
+    /// CGEvent input).
+    #[uniffi::constructor]
+    pub fn with_store_and_computer(
+        data_dir: String,
+        host: Box<dyn ComputerUseHost>,
+    ) -> Result<Arc<Self>, MahiError> {
+        let controller = Arc::new(HostComputerController { host: host.into() });
+        Self::build(Some(data_dir), controller)
     }
 
     /// Start a new conversation; returns its id. Runs in MacLan (see module docs).
@@ -844,5 +990,87 @@ impl MahiEngineHandle {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod computer_bridge_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FakeHost {
+        clicks: AtomicUsize,
+        keys: AtomicUsize,
+    }
+
+    impl ComputerUseHost for FakeHost {
+        fn screenshot(&self) -> Result<ScreenshotFfi, MahiError> {
+            Ok(ScreenshotFfi {
+                png: vec![1, 2, 3],
+                width: 4,
+                height: 5,
+            })
+        }
+        fn describe_ui(&self) -> Result<Vec<UiElementFfi>, MahiError> {
+            Ok(vec![UiElementFfi {
+                role: "button".to_string(),
+                label: Some("OK".to_string()),
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+                focused: true,
+            }])
+        }
+        fn click(&self, _x: i32, _y: i32, _button: String) -> Result<(), MahiError> {
+            self.clicks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn move_mouse(&self, _x: i32, _y: i32) -> Result<(), MahiError> {
+            Ok(())
+        }
+        fn type_text(&self, _text: String) -> Result<(), MahiError> {
+            Ok(())
+        }
+        fn scroll(&self, _dx: i32, _dy: i32) -> Result<(), MahiError> {
+            Ok(())
+        }
+        fn key(&self, _combo: String) -> Result<(), MahiError> {
+            self.keys.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn is_sensitive_context(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_controller_forwards_to_the_foreign_host() {
+        let host = Arc::new(FakeHost::default());
+        let controller = HostComputerController { host: host.clone() };
+
+        let shot = controller.screenshot().await.unwrap();
+        assert_eq!((shot.width, shot.height), (4, 5));
+        assert_eq!(shot.bytes, vec![1, 2, 3]);
+
+        let ui = controller.describe_ui().await.unwrap();
+        assert_eq!(ui.len(), 1);
+        assert_eq!(ui[0].role, "button");
+        assert_eq!(
+            ui[0].bounds,
+            UiBounds {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4
+            }
+        );
+
+        controller.click(10, 20, MouseButton::Left).await.unwrap();
+        controller.key("cmd+s").await.unwrap();
+        assert_eq!(host.clicks.load(Ordering::SeqCst), 1);
+        assert_eq!(host.keys.load(Ordering::SeqCst), 1);
+        assert!(!controller.is_sensitive_context().await);
     }
 }

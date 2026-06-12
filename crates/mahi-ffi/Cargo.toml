@@ -31,3 +31,6 @@ futures.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 uniffi = { version = "0.28", features = ["cli"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
