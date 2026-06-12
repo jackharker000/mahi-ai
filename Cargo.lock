@@ -1044,8 +1044,10 @@ dependencies = [
  "mahi-data",
  "mahi-tooling",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
