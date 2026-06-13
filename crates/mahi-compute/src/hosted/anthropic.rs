@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use mahi_contracts::compute::{
     CanHandleResult, FinishReason, InferenceChunk, InferenceProvider, InferenceRequest,
-    InferenceStream, ToolCallDelta,
+    InferenceStream, ThinkingDelta, ToolCallDelta,
 };
 use mahi_contracts::data::{ContentBlock, MessageRole};
 use mahi_contracts::error::{ContractError, InferenceError};
@@ -96,6 +96,18 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
             MessageRole::Assistant => {
                 let mut blocks: Vec<Value> = Vec::new();
                 let mut has_tool_use = false;
+                // Thinking blocks must come FIRST in the content array (and
+                // carry their signature) so the API will accept a tool_use turn
+                // when extended thinking is enabled.
+                for b in &m.content {
+                    if let ContentBlock::Thinking { thinking, signature } = b {
+                        blocks.push(json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        }));
+                    }
+                }
                 for b in &m.content {
                     match b {
                         ContentBlock::Text { text } if !text.is_empty() => {
@@ -117,10 +129,13 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                         _ => {}
                     }
                 }
-                if has_tool_use {
+                if blocks.is_empty() {
+                    // Plain-text turns with no structured blocks keep the simple
+                    // string shape.
+                    messages.push(json!({"role": "assistant", "content": m.text_content()}));
+                } else if has_tool_use || blocks.len() > 1 {
                     messages.push(json!({"role": "assistant", "content": blocks}));
                 } else {
-                    // Plain-text turns keep the simple string shape.
                     messages.push(json!({"role": "assistant", "content": m.text_content()}));
                 }
             }
@@ -174,12 +189,26 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if !system_parts.is_empty() {
         body["system"] = system_parts.join("\n").into();
     }
-    // Extended thinking and tool use can't be combined yet: the Messages API
-    // requires a tool_use assistant turn to replay its original *signed*
-    // thinking block, and we don't persist those. So thinking only applies to
-    // tool-free turns; with tools present we send a normal (non-thinking)
-    // request so multi-step tool loops don't 400.
-    let thinking = req.tools.is_none().then_some(req.thinking).flatten();
+    // Extended thinking now works alongside tools: the assistant's thinking
+    // block is persisted (with its signature) and replayed first on the next
+    // tool-use turn (see the assistant arm above). The one case we must still
+    // avoid is enabling thinking when the history contains an assistant
+    // tool_use turn WITHOUT a stored thinking block — the API would 400 because
+    // the signed block can't be reconstructed. That happens only for turns
+    // recorded before this feature, so we detect it and fall back gracefully.
+    let unreplayable_tool_turn = req.messages.iter().any(|m| {
+        m.role == MessageRole::Assistant
+            && m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+            && !m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { .. }))
+    });
+    let thinking = (!unreplayable_tool_turn)
+        .then_some(req.thinking)
+        .flatten();
     if let Some(thinking) = thinking {
         // The Messages API requires `max_tokens > budget_tokens`, so grow the
         // cap to leave room for both the reasoning and the visible answer.
@@ -319,12 +348,46 @@ impl AnthropicSseParser {
                                     .unwrap_or_default()
                                     .to_string(),
                             }),
+                            thinking_delta: None,
                             finish_reason: None,
                             active_mode: self.mode,
                             latency_hint_ms: None,
                         })]
                     }
-                    _ => Vec::new(), // e.g. thinking_delta — not surfaced
+                    // Extended-thinking text. Surfaced so the agent can persist
+                    // the reasoning block and replay it (with its signature) on
+                    // the next tool-use turn.
+                    Some("thinking_delta") => {
+                        let text = delta["thinking"].as_str().unwrap_or_default();
+                        if text.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![Ok(InferenceChunk::thinking(
+                                ThinkingDelta {
+                                    text: text.to_string(),
+                                    signature: None,
+                                },
+                                self.mode,
+                            ))]
+                        }
+                    }
+                    // The signature that closes a thinking block; required to
+                    // replay the block later.
+                    Some("signature_delta") => {
+                        let sig = delta["signature"].as_str().unwrap_or_default();
+                        if sig.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![Ok(InferenceChunk::thinking(
+                                ThinkingDelta {
+                                    text: String::new(),
+                                    signature: Some(sig.to_string()),
+                                },
+                                self.mode,
+                            ))]
+                        }
+                    }
+                    _ => Vec::new(),
                 }
             }
             "message_delta" => {
@@ -653,10 +716,9 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_omitted_when_tools_are_present() {
+    fn thinking_enabled_with_tools_on_clean_history() {
         use mahi_contracts::compute::{ThinkingConfig, ToolSpec};
         let mut req = sample_request();
-        req.temperature = Some(0.4);
         req.thinking = Some(ThinkingConfig::with_budget(4096));
         req.tools = Some(vec![ToolSpec {
             id: "web_search".to_string(),
@@ -664,14 +726,73 @@ mod tests {
             input_schema: json!({"type": "object"}),
         }]);
         let body = request_body("claude-fable-5", &req);
-        // Thinking + tool_use needs signed thinking blocks we don't persist, so
-        // tool turns must NOT enable thinking (and temperature is honored).
+        // No prior tool_use turn to replay → thinking and tools coexist.
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body["tools"].is_array());
+    }
+
+    #[test]
+    fn thinking_disabled_when_prior_tool_use_lacks_a_thinking_block() {
+        use mahi_contracts::compute::ThinkingConfig;
+        let conv = Uuid::new_v4();
+        let mut assistant =
+            Message::text(conv, MessageRole::Assistant, "", ComputeMode::Hosted, 1);
+        assistant.content = vec![ContentBlock::ToolCall {
+            call_id: "toolu_1".to_string(),
+            tool_id: "web_search".to_string(),
+            args: json!({"query": "x"}),
+        }];
+        let mut req = InferenceRequest::from_messages(vec![
+            Message::text(conv, MessageRole::User, "hi", ComputeMode::Hosted, 0),
+            assistant,
+        ]);
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        let body = request_body("claude-fable-5", &req);
+        // The unreplayable tool_use turn would 400 if thinking were enabled.
         assert!(
             body.get("thinking").is_none(),
-            "thinking must be omitted when tools are present: {body}"
+            "thinking must be disabled when a prior tool_use turn has no signed thinking block: {body}"
         );
-        assert!(body["tools"].is_array());
-        assert!((body["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn request_body_replays_stored_thinking_block_first_with_signature() {
+        use mahi_contracts::compute::ThinkingConfig;
+        let conv = Uuid::new_v4();
+        let mut assistant =
+            Message::text(conv, MessageRole::Assistant, "answer", ComputeMode::Hosted, 1);
+        assistant.content = vec![
+            ContentBlock::Thinking {
+                thinking: "let me search".to_string(),
+                signature: "sig_abc".to_string(),
+            },
+            ContentBlock::ToolCall {
+                call_id: "toolu_1".to_string(),
+                tool_id: "web_search".to_string(),
+                args: json!({"query": "x"}),
+            },
+        ];
+        let mut result =
+            Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 2);
+        result.content = vec![ContentBlock::ToolResult {
+            call_id: "toolu_1".to_string(),
+            output: json!({"results": []}),
+        }];
+        let mut req = InferenceRequest::from_messages(vec![
+            Message::text(conv, MessageRole::User, "search x", ComputeMode::Hosted, 0),
+            assistant,
+            result,
+        ]);
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        let body = request_body("claude-fable-5", &req);
+        let assistant_msg = &body["messages"][1];
+        // Thinking block replayed FIRST with its signature, then the tool_use.
+        assert_eq!(assistant_msg["content"][0]["type"], "thinking");
+        assert_eq!(assistant_msg["content"][0]["thinking"], "let me search");
+        assert_eq!(assistant_msg["content"][0]["signature"], "sig_abc");
+        assert_eq!(assistant_msg["content"][1]["type"], "tool_use");
+        // The stored block is replayable, so thinking stays enabled.
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]
@@ -691,6 +812,45 @@ mod tests {
         assert_eq!(p.model, "claude-fable-5");
         let q = AnthropicProvider::with_model("sk-test", "claude-opus-4-8");
         assert_eq!(q.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn parser_surfaces_thinking_text_and_signature() {
+        let mut parser = AnthropicSseParser::new(ComputeMode::Hosted);
+        let mut chunks = Vec::new();
+        for (event, data) in [
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason."}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_xyz"}}"#,
+            ),
+            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+        ] {
+            chunks.extend(parser.handle(event, data));
+        }
+        let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| c.thinking_delta.as_ref())
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(text, "Let me reason.");
+        let sig = chunks
+            .iter()
+            .filter_map(|c| c.thinking_delta.as_ref())
+            .find_map(|t| t.signature.clone());
+        assert_eq!(sig.as_deref(), Some("sig_xyz"));
     }
 
     #[test]

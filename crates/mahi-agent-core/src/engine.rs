@@ -313,8 +313,13 @@ impl MahiEngine {
 enum RoundOutcome {
     /// Generation ended for a non-tool reason.
     Finished(FinishReason),
-    /// The model requested one or more tool calls.
-    ToolCalls(Vec<PendingToolCall>),
+    /// The model requested one or more tool calls, optionally preceded by an
+    /// extended-thinking block `(reasoning_text, signature)` that must be
+    /// persisted and replayed on the follow-up turn.
+    ToolCalls {
+        calls: Vec<PendingToolCall>,
+        thinking: Option<(String, String)>,
+    },
     /// The caller's cancellation token fired.
     Cancelled,
 }
@@ -408,11 +413,12 @@ impl TurnRunner {
                     self.persist_assistant_text(&segment_text).await?;
                     return Ok(reason);
                 }
-                RoundOutcome::ToolCalls(calls) => {
-                    // Step 4: record the assistant tool-call message, then run
+                RoundOutcome::ToolCalls { calls, thinking } => {
+                    // Step 4: record the assistant tool-call message (with its
+                    // thinking block, so it replays on the next turn), then run
                     // each call (gated by approval where required) and loop.
                     let assistant_message_id = self
-                        .persist_assistant_tool_calls(&segment_text, &calls)
+                        .persist_assistant_tool_calls(&segment_text, &calls, thinking)
                         .await?;
                     for call in calls {
                         if self.cancel.is_cancelled() {
@@ -477,6 +483,9 @@ impl TurnRunner {
         segment_text: &mut String,
     ) -> Result<RoundOutcome, ContractError> {
         let mut calls: Vec<PendingToolCall> = Vec::new();
+        // Accumulated extended-thinking reasoning + its signature for this round.
+        let mut thinking_text = String::new();
+        let mut thinking_signature: Option<String> = None;
         loop {
             let next = tokio::select! {
                 biased;
@@ -505,9 +514,23 @@ impl TurnRunner {
                 }
             }
 
+            if let Some(t) = chunk.thinking_delta {
+                thinking_text.push_str(&t.text);
+                if let Some(sig) = t.signature {
+                    thinking_signature = Some(sig);
+                }
+            }
+
             if let Some(tc) = chunk.tool_call_delta {
                 match calls.iter_mut().find(|c| c.call_id == tc.call_id) {
-                    Some(existing) => existing.args_raw.push_str(&tc.args_delta),
+                    Some(existing) => {
+                        existing.args_raw.push_str(&tc.args_delta);
+                        // The tool name usually arrives only on the first delta;
+                        // capture it if a later delta is the one that carries it.
+                        if existing.tool_id.is_empty() && !tc.tool_id.is_empty() {
+                            existing.tool_id = tc.tool_id;
+                        }
+                    }
                     None => calls.push(PendingToolCall {
                         call_id: tc.call_id,
                         tool_id: tc.tool_id,
@@ -517,8 +540,17 @@ impl TurnRunner {
             }
 
             if let Some(reason) = chunk.finish_reason {
+                // Only carry a thinking block when it has a signature — without
+                // one it can't be replayed, and a partial block would 400.
+                let thinking = thinking_signature
+                    .take()
+                    .filter(|_| !thinking_text.is_empty())
+                    .map(|sig| (std::mem::take(&mut thinking_text), sig));
                 return Ok(match reason {
-                    FinishReason::ToolCall if !calls.is_empty() => RoundOutcome::ToolCalls(calls),
+                    FinishReason::ToolCall if !calls.is_empty() => RoundOutcome::ToolCalls {
+                        calls,
+                        thinking,
+                    },
                     // A ToolCall finish with no accumulated call is a provider
                     // hiccup; degrade gracefully to a stop.
                     FinishReason::ToolCall => RoundOutcome::Finished(FinishReason::Stop),
@@ -690,6 +722,7 @@ impl TurnRunner {
         &self,
         text: &str,
         calls: &[PendingToolCall],
+        thinking: Option<(String, String)>,
     ) -> Result<Uuid, ContractError> {
         let sequence = self
             .inner
@@ -698,6 +731,14 @@ impl TurnRunner {
             .next_sequence(self.conversation.id)
             .await?;
         let mut content: Vec<ContentBlock> = Vec::new();
+        // The thinking block must be the FIRST block so the Messages API
+        // accepts the tool_use turn when extended thinking is replayed.
+        if let Some((thinking, signature)) = thinking {
+            content.push(ContentBlock::Thinking {
+                thinking,
+                signature,
+            });
+        }
         if !text.is_empty() {
             content.push(ContentBlock::Text {
                 text: text.to_string(),
@@ -879,7 +920,17 @@ fn parse_args(raw: &str) -> serde_json::Value {
     if trimmed.is_empty() {
         return serde_json::json!({});
     }
-    serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+    // Tool inputs must be JSON objects (a provider may stream truncated/garbled
+    // args). Falling back to a *string* would both fail the tool's schema and
+    // be rejected when replayed as a `tool_use.input` — so degrade to an empty
+    // object, which surfaces a clear "missing field" error the model can fix.
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v @ serde_json::Value::Object(_)) => v,
+        Ok(_) | Err(_) => {
+            tracing::warn!(raw, "tool args were not a JSON object; using empty args");
+            serde_json::json!({})
+        }
+    }
 }
 
 /// Truncate a string for human-readable approval summaries (UTF-8 safe).

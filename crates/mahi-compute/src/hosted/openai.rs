@@ -330,6 +330,7 @@ impl OpenAiSseParser {
                         tool_id: identity.tool_id.clone(),
                         args_delta: args_delta.to_string(),
                     }),
+                    thinking_delta: None,
                     finish_reason: None,
                     active_mode: self.mode,
                     latency_hint_ms: None,

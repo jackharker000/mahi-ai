@@ -105,6 +105,9 @@ pub struct ToolSpec {
 pub struct InferenceChunk {
     pub delta: Option<String>,
     pub tool_call_delta: Option<ToolCallDelta>,
+    /// Incremental extended-thinking output (Anthropic). Accumulate the text
+    /// across chunks; the final chunk of the block carries the `signature`.
+    pub thinking_delta: Option<ThinkingDelta>,
     pub finish_reason: Option<FinishReason>,
     /// Echoed on *every* chunk so the surface always knows the active mode.
     pub active_mode: ComputeMode,
@@ -117,6 +120,7 @@ impl InferenceChunk {
         Self {
             delta: Some(delta.into()),
             tool_call_delta: None,
+            thinking_delta: None,
             finish_reason: None,
             active_mode: mode,
             latency_hint_ms: None,
@@ -128,7 +132,20 @@ impl InferenceChunk {
         Self {
             delta: None,
             tool_call_delta: None,
+            thinking_delta: None,
             finish_reason: Some(reason),
+            active_mode: mode,
+            latency_hint_ms: None,
+        }
+    }
+
+    /// A chunk carrying a thinking delta (and optionally its signature).
+    pub fn thinking(delta: ThinkingDelta, mode: ComputeMode) -> Self {
+        Self {
+            delta: None,
+            tool_call_delta: None,
+            thinking_delta: Some(delta),
+            finish_reason: None,
             active_mode: mode,
             latency_hint_ms: None,
         }
@@ -141,6 +158,15 @@ pub struct ToolCallDelta {
     pub call_id: String,
     pub tool_id: String,
     pub args_delta: String,
+}
+
+/// An incremental extended-thinking payload. Accumulate `text` across chunks;
+/// `signature` arrives once when the thinking block closes and must be stored
+/// so the block can be replayed on a later tool-use turn (Anthropic rule).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingDelta {
+    pub text: String,
+    pub signature: Option<String>,
 }
 
 /// Why a generation stream ended.

@@ -127,6 +127,14 @@ pub enum ContentBlock {
         /// Base64-encoded image bytes.
         data: String,
     },
+    /// Extended-thinking reasoning emitted by the model (Anthropic). The
+    /// `signature` is the cryptographic signature the Messages API requires in
+    /// order to replay this block on a later tool-use turn, so it is persisted
+    /// alongside the reasoning text.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
 }
 
 /// A persistent memory fact about the user/project.
