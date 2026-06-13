@@ -173,6 +173,34 @@ impl ToolRegistry {
         }
         Ok(ids)
     }
+
+    /// Load a Claude-Desktop-style `mcpServers` config file, connect to every
+    /// server, and mount their tools. Resilient: a server that fails to start
+    /// or whose tools collide is logged and skipped rather than failing the
+    /// whole load. Returns every successfully registered tool id. A missing
+    /// config file is not an error (returns an empty list).
+    pub async fn mount_mcp_servers_from_config(
+        &self,
+        config_path: impl AsRef<Path>,
+    ) -> Result<Vec<String>, ContractError> {
+        let configs = crate::mcp::load_mcp_config(config_path.as_ref())
+            .map_err(|e| ContractError::other(format!("failed to read MCP config: {e}")))?;
+        let mut all_ids = Vec::new();
+        for cfg in configs {
+            match crate::mcp::McpClient::connect(&cfg).await {
+                Ok(client) => match self.attach_mcp_server(Arc::new(client)) {
+                    Ok(ids) => all_ids.extend(ids),
+                    Err(e) => {
+                        tracing::warn!(server = %cfg.name, error = %e, "MCP server tools not attached")
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(server = %cfg.name, error = %e, "MCP server failed to start")
+                }
+            }
+        }
+        Ok(all_ids)
+    }
 }
 
 #[async_trait]

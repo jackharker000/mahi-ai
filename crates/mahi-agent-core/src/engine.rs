@@ -547,10 +547,9 @@ impl TurnRunner {
                     .filter(|_| !thinking_text.is_empty())
                     .map(|sig| (std::mem::take(&mut thinking_text), sig));
                 return Ok(match reason {
-                    FinishReason::ToolCall if !calls.is_empty() => RoundOutcome::ToolCalls {
-                        calls,
-                        thinking,
-                    },
+                    FinishReason::ToolCall if !calls.is_empty() => {
+                        RoundOutcome::ToolCalls { calls, thinking }
+                    }
                     // A ToolCall finish with no accumulated call is a provider
                     // hiccup; degrade gracefully to a stop.
                     FinishReason::ToolCall => RoundOutcome::Finished(FinishReason::Stop),

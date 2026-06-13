@@ -69,6 +69,11 @@ fn subject_key(subject: &PermissionSubject) -> String {
 impl SqliteBackend {
     /// Wrap an open connection, applying migrations.
     pub fn new(conn: Connection, root: [u8; 32]) -> Result<Arc<Self>, ContractError> {
+        // WAL lets readers run concurrently with a writer and makes the single
+        // writer faster — important when up to 10 subagents append messages at
+        // once. `synchronous=NORMAL` is the standard, safe pairing for WAL.
+        // (Best-effort: an in-memory DB ignores WAL, so don't hard-fail.)
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         conn.execute_batch(SCHEMA).map_err(be)?;
         Ok(Arc::new(Self {
             conn: Arc::new(Mutex::new(conn)),

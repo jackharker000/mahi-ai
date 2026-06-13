@@ -228,6 +228,27 @@ fn map_event(
     }
 }
 
+/// The MCP config file to auto-load, if present. Checks, in order: an explicit
+/// `MAHI_MCP_CONFIG` override, the macOS Claude Desktop config, and `~/.claude`.
+/// All use the same `{ "mcpServers": { ... } }` shape.
+fn default_mcp_config_path() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("MAHI_MCP_CONFIG") {
+        if !explicit.trim().is_empty() {
+            return Some(PathBuf::from(explicit));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let candidates = [
+        format!("{home}/Library/Application Support/Claude/claude_desktop_config.json"),
+        format!("{home}/.claude/claude.json"),
+        format!("{home}/.config/mahi/mcp_servers.json"),
+    ];
+    candidates
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+}
+
 fn render_tool_output(output: &serde_json::Value) -> String {
     match output {
         serde_json::Value::String(s) => s.clone(),
@@ -608,6 +629,15 @@ impl MahiEngineHandle {
             .map(PathBuf::from)
             .unwrap_or_else(|_| base_dir.clone());
         let tools = Arc::new(ToolRegistry::with_builtins_scoped(controller, workspace));
+
+        // Auto-load Claude-Desktop-style MCP servers so their tools are
+        // available out of the box, exactly like Claude Desktop. Best-effort:
+        // a missing config or a server that fails to start is logged, not fatal.
+        if let Some(cfg_path) = default_mcp_config_path() {
+            if cfg_path.is_file() {
+                let _ = rt.block_on(tools.mount_mcp_servers_from_config(&cfg_path));
+            }
+        }
 
         let engine = MahiEngine::new(EngineConfig {
             data,

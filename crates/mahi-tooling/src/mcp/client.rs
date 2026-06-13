@@ -169,14 +169,15 @@ impl McpClient {
         timeout: Duration,
     ) -> Result<Value, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // Encode BEFORE registering the pending sender so an encode failure
+        // can't leave an orphaned entry in the pending map.
+        let payload = serde_json::to_string(&Request::new(id, method, params))
+            .map_err(|e| McpError::Protocol(format!("failed to encode `{method}`: {e}")))?;
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .expect("mcp pending lock poisoned")
             .insert(id, tx);
-
-        let payload = serde_json::to_string(&Request::new(id, method, params))
-            .map_err(|e| McpError::Protocol(format!("failed to encode `{method}`: {e}")))?;
         if let Err(e) = self.send_line(payload).await {
             self.remove_pending(id);
             return Err(e);

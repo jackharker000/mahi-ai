@@ -100,7 +100,11 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                 // carry their signature) so the API will accept a tool_use turn
                 // when extended thinking is enabled.
                 for b in &m.content {
-                    if let ContentBlock::Thinking { thinking, signature } = b {
+                    if let ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } = b
+                    {
                         blocks.push(json!({
                             "type": "thinking",
                             "thinking": thinking,
@@ -206,9 +210,7 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
                 .iter()
                 .any(|b| matches!(b, ContentBlock::Thinking { .. }))
     });
-    let thinking = (!unreplayable_tool_turn)
-        .then_some(req.thinking)
-        .flatten();
+    let thinking = (!unreplayable_tool_turn).then_some(req.thinking).flatten();
     if let Some(thinking) = thinking {
         // The Messages API requires `max_tokens > budget_tokens`, so grow the
         // cap to leave room for both the reasoning and the visible answer.
@@ -735,8 +737,7 @@ mod tests {
     fn thinking_disabled_when_prior_tool_use_lacks_a_thinking_block() {
         use mahi_contracts::compute::ThinkingConfig;
         let conv = Uuid::new_v4();
-        let mut assistant =
-            Message::text(conv, MessageRole::Assistant, "", ComputeMode::Hosted, 1);
+        let mut assistant = Message::text(conv, MessageRole::Assistant, "", ComputeMode::Hosted, 1);
         assistant.content = vec![ContentBlock::ToolCall {
             call_id: "toolu_1".to_string(),
             tool_id: "web_search".to_string(),
@@ -759,8 +760,13 @@ mod tests {
     fn request_body_replays_stored_thinking_block_first_with_signature() {
         use mahi_contracts::compute::ThinkingConfig;
         let conv = Uuid::new_v4();
-        let mut assistant =
-            Message::text(conv, MessageRole::Assistant, "answer", ComputeMode::Hosted, 1);
+        let mut assistant = Message::text(
+            conv,
+            MessageRole::Assistant,
+            "answer",
+            ComputeMode::Hosted,
+            1,
+        );
         assistant.content = vec![
             ContentBlock::Thinking {
                 thinking: "let me search".to_string(),
@@ -772,8 +778,7 @@ mod tests {
                 args: json!({"query": "x"}),
             },
         ];
-        let mut result =
-            Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 2);
+        let mut result = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 2);
         result.content = vec![ContentBlock::ToolResult {
             call_id: "toolu_1".to_string(),
             output: json!({"results": []}),
@@ -835,7 +840,10 @@ mod tests {
                 "content_block_delta",
                 r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_xyz"}}"#,
             ),
-            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
         ] {
             chunks.extend(parser.handle(event, data));
         }
