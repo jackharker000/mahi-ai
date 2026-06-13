@@ -110,5 +110,9 @@ jobs:
             (universal binary).
 
             **Install:** download `Mahi.dmg`, open it, and drag **Mahi** into **Applications**.
-            On first launch, right-click the app and choose **Open** (it is not notarized,
-            so a normal double-click is blocked by Gatekeeper the first time).
+
+            **First launch (one time):** the build is not notarized, so Gatekeeper blocks it
+            ("Apple could not verify…"). Click **Done** (not "Move to Bin"), then go to
+            **System Settings → Privacy & Security**, scroll to **Security**, and click
+            **Open Anyway**. On macOS 13/14 you can instead right-click the app → **Open**.
+            Terminal alternative: `xattr -dr com.apple.quarantine /Applications/Mahi.app`.

@@ -36,6 +36,12 @@ pub struct CapabilitySet {
     /// Minimum usable context window, in tokens.
     pub min_context_window: u32,
     pub code_gen: bool,
+    /// Whether the model supports an extended "thinking"/reasoning budget that
+    /// lets it deliberate before answering (Anthropic extended thinking, the
+    /// Qwen/Phi reasoning toggle, etc.). Defaults to `false` so older callers
+    /// and on-device stand-ins are unaffected.
+    #[serde(default)]
+    pub thinking: bool,
 }
 
 impl CapabilitySet {
@@ -53,6 +59,7 @@ impl CapabilitySet {
                 .min_context_window
                 .saturating_sub(other.min_context_window),
             code_gen: self.code_gen && !other.code_gen,
+            thinking: self.thinking && !other.thinking,
         }
     }
 
@@ -61,6 +68,7 @@ impl CapabilitySet {
         (!self.vision || other.vision)
             && (!self.tool_calling || other.tool_calling)
             && (!self.code_gen || other.code_gen)
+            && (!self.thinking || other.thinking)
             && other.min_context_window >= self.min_context_window
     }
 }

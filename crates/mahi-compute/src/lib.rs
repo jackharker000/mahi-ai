@@ -22,9 +22,18 @@ pub mod router;
 #[cfg(feature = "hosted")]
 pub mod hosted;
 
+#[cfg(feature = "local-llm")]
+pub mod local;
+
 pub use capability::build_capability_snapshot;
 pub use on_device::OnDeviceProvider;
 pub use router::{InferenceRouter, InferenceRouterBuilder};
 
 #[cfg(feature = "hosted")]
 pub use hosted::{AnthropicProvider, OpenAiCompatProvider};
+
+#[cfg(feature = "local-llm")]
+pub use local::{
+    catalog_descriptor, model_catalog, CatalogEntry, LlamaRuntime, LocalError, LocalLlamaProvider,
+    ModelManager, RuntimeStatus,
+};

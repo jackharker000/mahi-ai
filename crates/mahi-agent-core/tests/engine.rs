@@ -170,6 +170,67 @@ impl InferenceProvider for ToolThenTextProvider {
     }
 }
 
+// ─────────────────────────── Recording provider ───────────────────────────
+
+/// A chunk carrying one tool-call delta (args may be split across chunks).
+fn tool_call_chunk(call_id: &str, tool_id: &str, args_delta: &str) -> InferenceChunk {
+    InferenceChunk {
+        delta: None,
+        tool_call_delta: Some(ToolCallDelta {
+            call_id: call_id.to_string(),
+            tool_id: tool_id.to_string(),
+            args_delta: args_delta.to_string(),
+        }),
+        finish_reason: None,
+        active_mode: ComputeMode::OnDevice,
+        latency_hint_ms: None,
+    }
+}
+
+/// Scripted provider that records every [`InferenceRequest`] it receives.
+/// Round `n` replays `scripts[n]` (the last script repeats past the end).
+struct RecordingProvider {
+    scripts: Vec<Vec<InferenceChunk>>,
+    requests: std::sync::Mutex<Vec<InferenceRequest>>,
+}
+
+impl RecordingProvider {
+    fn new(scripts: Vec<Vec<InferenceChunk>>) -> Self {
+        Self {
+            scripts,
+            requests: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<InferenceRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl InferenceProvider for RecordingProvider {
+    fn descriptor(&self) -> ModelDescriptor {
+        scripted_model()
+    }
+
+    async fn can_handle(&self, _req: &InferenceRequest) -> CanHandleResult {
+        CanHandleResult::capable()
+    }
+
+    async fn generate(
+        &self,
+        req: InferenceRequest,
+        _cancel: CancellationToken,
+    ) -> Result<InferenceStream, ContractError> {
+        let mut requests = self.requests.lock().unwrap();
+        let round = requests.len().min(self.scripts.len() - 1);
+        requests.push(req);
+        let chunks: Vec<Result<InferenceChunk, ContractError>> =
+            self.scripts[round].iter().cloned().map(Ok).collect();
+        Ok(Box::pin(futures::stream::iter(chunks)))
+    }
+}
+
 // ─────────────────────────── Helpers ───────────────────────────
 
 fn engine_with(
@@ -502,6 +563,231 @@ async fn denied_approval_skips_tool_and_feeds_denial_back() {
     assert_eq!(audit[0].outcome, AuditOutcome::Denied);
     let history = engine.history(conversation_id).await.unwrap();
     assert!(history.iter().any(|m| m.role == MessageRole::Tool));
+}
+
+/// End-to-end with a REAL builtin tool: round 1 the model calls `file_read`
+/// (args split across deltas) against a tempdir-scoped ToolRegistry; round 2
+/// it answers using the result. Captured requests prove (a) tool specs are
+/// sent on every round and (b) the tool RESULT text reaches round 2.
+#[tokio::test]
+async fn file_read_round_trip_feeds_result_into_round_two_request() {
+    use mahi_tooling::{MockComputerController, ToolRegistry};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "the secret is kiwi").unwrap();
+
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![
+            tool_call_chunk("c1", "file_read", "{\"path\":"),
+            tool_call_chunk("c1", "file_read", "\"notes.txt\"}"),
+            InferenceChunk::finish(FinishReason::ToolCall, ComputeMode::OnDevice),
+        ],
+        vec![
+            InferenceChunk::text("The note says: the secret is kiwi.", ComputeMode::OnDevice),
+            InferenceChunk::finish(FinishReason::Stop, ComputeMode::OnDevice),
+        ],
+    ]));
+    let tools = Arc::new(ToolRegistry::with_builtins_scoped(
+        Arc::new(MockComputerController::new()),
+        dir.path(),
+    ));
+    let engine = engine_with(in_memory_datastore(), provider.clone(), tools);
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
+
+    let stream = engine
+        .run_turn(
+            conversation_id,
+            "what does notes.txt say?".to_string(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let events = drain(stream).await;
+
+    // Event sequence: TurnStarted ... Tool(Result) ... TextDelta ... TurnFinished(Stop).
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::TurnStarted { .. })
+    ));
+    let result_pos = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Tool {
+                    event: ToolEvent::Result { .. }
+                }
+            )
+        })
+        .expect("expected a tool Result event");
+    let text_pos = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        .expect("expected a text delta after the tool ran");
+    assert!(result_pos < text_pos, "tool result must precede final text");
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "no errors expected: {events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnFinished {
+            reason: FinishReason::Stop
+        })
+    ));
+    assert_eq!(
+        collected_text(&events),
+        "The note says: the secret is kiwi."
+    );
+
+    // Captured requests: two rounds, each carrying the registry's tool specs.
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let specs = request.tools.as_ref().expect("tools sent every round");
+        let file_read = specs
+            .iter()
+            .find(|s| s.id == "file_read")
+            .expect("file_read spec present");
+        assert!(file_read.input_schema["properties"]["path"].is_object());
+        assert!(!file_read.description.is_empty());
+    }
+
+    // Round 2 transcript carries the assistant tool call and the REAL result.
+    let round2 = &requests[1].messages;
+    let assistant_call = round2
+        .iter()
+        .find(|m| {
+            m.role == MessageRole::Assistant
+                && m.content.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolCall { call_id, tool_id, args }
+                            if call_id == "c1"
+                                && tool_id == "file_read"
+                                && args["path"] == "notes.txt"
+                    )
+                })
+        })
+        .is_some();
+    assert!(
+        assistant_call,
+        "round 2 must replay the assistant tool call"
+    );
+    let result_content = round2
+        .iter()
+        .filter(|m| m.role == MessageRole::Tool)
+        .flat_map(|m| m.content.iter())
+        .find_map(|b| match b {
+            ContentBlock::ToolResult { call_id, output } if call_id == "c1" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("round 2 must carry the tool result for c1");
+    assert_eq!(result_content["content"], "the secret is kiwi");
+}
+
+/// Two parallel tool calls in one assistant turn, deltas interleaved across
+/// distinct call ids: both execute, and both results reach round 2.
+#[tokio::test]
+async fn parallel_tool_calls_in_one_round_both_execute_and_feed_back() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![
+            // Interleaved fragments for two distinct calls.
+            tool_call_chunk("c1", "echo", "{\"msg\":"),
+            tool_call_chunk("c2", "echo", "{\"msg\":"),
+            tool_call_chunk("c1", "echo", "\"first\"}"),
+            tool_call_chunk("c2", "echo", "\"second\"}"),
+            InferenceChunk::finish(FinishReason::ToolCall, ComputeMode::OnDevice),
+        ],
+        vec![
+            InferenceChunk::text("Both tools ran.", ComputeMode::OnDevice),
+            InferenceChunk::finish(FinishReason::Stop, ComputeMode::OnDevice),
+        ],
+    ]));
+    let tools = Arc::new(StubTools::with_echo(false));
+    let engine = engine_with(in_memory_datastore(), provider.clone(), tools.clone());
+    let conversation_id = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
+
+    let stream = engine
+        .run_turn(
+            conversation_id,
+            "run echo twice".to_string(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let events = drain(stream).await;
+
+    // Both calls executed, two Result events streamed, turn finished cleanly.
+    assert_eq!(tools.invocation_count(), 2);
+    let result_events = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::Tool {
+                    event: ToolEvent::Result { .. }
+                }
+            )
+        })
+        .count();
+    assert_eq!(result_events, 2);
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnFinished {
+            reason: FinishReason::Stop
+        })
+    ));
+
+    // One assistant message carries BOTH accumulated tool calls.
+    let history = engine.history(conversation_id).await.unwrap();
+    let assistant = history
+        .iter()
+        .find(|m| {
+            m.role == MessageRole::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+        })
+        .expect("assistant tool-call message persisted");
+    let calls: Vec<(&str, &str, &serde_json::Value)> = assistant
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolCall {
+                call_id,
+                tool_id,
+                args,
+            } => Some((call_id.as_str(), tool_id.as_str(), args)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, "c1");
+    assert_eq!(calls[0].2["msg"], "first");
+    assert_eq!(calls[1].0, "c2");
+    assert_eq!(calls[1].2["msg"], "second");
+
+    // Round 2's request contains a tool result for each call id.
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let round2_results: Vec<String> = requests[1]
+        .messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Tool)
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(round2_results, vec!["c1".to_string(), "c2".to_string()]);
 }
 
 #[tokio::test]

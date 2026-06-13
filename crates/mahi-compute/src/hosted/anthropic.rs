@@ -14,7 +14,7 @@ use mahi_contracts::compute::{
     CanHandleResult, FinishReason, InferenceChunk, InferenceProvider, InferenceRequest,
     InferenceStream, ToolCallDelta,
 };
-use mahi_contracts::data::MessageRole;
+use mahi_contracts::data::{ContentBlock, MessageRole};
 use mahi_contracts::error::{ContractError, InferenceError};
 use mahi_contracts::types::{
     CapabilitySet, ComputeMode, ModelDescriptor, ModelSource, PerfProfile,
@@ -57,10 +57,35 @@ impl AnthropicProvider {
     }
 }
 
+/// Render a tool output value as `tool_result` content (raw text passes
+/// through; structured values serialize as JSON).
+fn tool_output_to_string(output: &Value) -> String {
+    match output {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Anthropic `image` content blocks for any [`ContentBlock::Image`] in `m`.
+fn anthropic_image_blocks(m: &mahi_contracts::data::Message) -> Vec<Value> {
+    m.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data },
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Build the Messages API request body for `req` (pure; unit-tested).
 ///
-/// System-role messages are lifted into the top-level `system` field; tool
-/// role messages are folded into user turns.
+/// System-role messages are lifted into the top-level `system` field.
+/// Assistant `ContentBlock::ToolCall`s serialize as `tool_use` content
+/// blocks; tool-role `ContentBlock::ToolResult`s become `tool_result` blocks
+/// inside user turns (consecutive user turns are merged by the API).
 pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     let mut system_parts: Vec<String> = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
@@ -69,13 +94,73 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
         match m.role {
             MessageRole::System => system_parts.push(m.text_content()),
             MessageRole::Assistant => {
-                messages.push(json!({"role": "assistant", "content": m.text_content()}))
+                let mut blocks: Vec<Value> = Vec::new();
+                let mut has_tool_use = false;
+                for b in &m.content {
+                    match b {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            blocks.push(json!({"type": "text", "text": text}));
+                        }
+                        ContentBlock::ToolCall {
+                            call_id,
+                            tool_id,
+                            args,
+                        } => {
+                            has_tool_use = true;
+                            blocks.push(json!({
+                                "type": "tool_use",
+                                "id": call_id,
+                                "name": tool_id,
+                                "input": args,
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                if has_tool_use {
+                    messages.push(json!({"role": "assistant", "content": blocks}));
+                } else {
+                    // Plain-text turns keep the simple string shape.
+                    messages.push(json!({"role": "assistant", "content": m.text_content()}));
+                }
             }
-            // TODO(contracts): tool results should map to `tool_result`
-            // content blocks keyed by call id; `Message` does not carry
-            // enough structure for that yet, so fold them into user turns.
-            MessageRole::User | MessageRole::Tool => {
-                messages.push(json!({"role": "user", "content": m.text_content()}))
+            MessageRole::Tool => {
+                let mut content: Vec<Value> = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult { call_id, output } => Some(json!({
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": tool_output_to_string(output),
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                // A vision model sees the screenshot: attach inline images to the
+                // same user turn as the tool_result.
+                content.extend(anthropic_image_blocks(m));
+                if content.is_empty() {
+                    // Defensive: a tool message without a structured result
+                    // block still surfaces as user context.
+                    messages.push(json!({"role": "user", "content": m.text_content()}));
+                } else {
+                    messages.push(json!({"role": "user", "content": content}));
+                }
+            }
+            MessageRole::User => {
+                let images = anthropic_image_blocks(m);
+                if images.is_empty() {
+                    messages.push(json!({"role": "user", "content": m.text_content()}));
+                } else {
+                    let mut content = Vec::new();
+                    let text = m.text_content();
+                    if !text.is_empty() {
+                        content.push(json!({"type": "text", "text": text}));
+                    }
+                    content.extend(images);
+                    messages.push(json!({"role": "user", "content": content}));
+                }
             }
         }
     }
@@ -89,7 +174,20 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if !system_parts.is_empty() {
         body["system"] = system_parts.join("\n").into();
     }
-    if let Some(temperature) = req.temperature {
+    if let Some(thinking) = &req.thinking {
+        // Extended thinking lets the model deliberate before answering. The
+        // Messages API requires `max_tokens > budget_tokens`, so grow the cap
+        // to leave room for both the reasoning and the visible answer.
+        let budget = thinking.budget_tokens.max(1024);
+        let max = req
+            .max_tokens
+            .unwrap_or(DEFAULT_MAX_TOKENS)
+            .max(budget.saturating_add(DEFAULT_MAX_TOKENS));
+        body["max_tokens"] = max.into();
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        // Extended thinking requires the default temperature; only set an
+        // explicit temperature when thinking is off.
+    } else if let Some(temperature) = req.temperature {
         body["temperature"] = temperature.into();
     }
     if let Some(tools) = &req.tools {
@@ -174,10 +272,18 @@ impl AnthropicSseParser {
                 let block = &value["content_block"];
                 if block["type"].as_str() == Some("tool_use") {
                     let index = value["index"].as_u64().unwrap_or(0);
+                    // `id` is always present on the wire; the synthesized
+                    // fallback only guards against a malformed event so
+                    // parallel calls still stay distinct.
+                    let call_id = block["id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("toolu_{index}"));
                     self.tool_blocks.insert(
                         index,
                         ToolBlockIdentity {
-                            call_id: block["id"].as_str().unwrap_or_default().to_string(),
+                            call_id,
                             tool_id: block["name"].as_str().unwrap_or_default().to_string(),
                         },
                     );
@@ -277,6 +383,7 @@ impl InferenceProvider for AnthropicProvider {
                 tool_calling: true,
                 min_context_window: 200_000,
                 code_gen: true,
+                thinking: true,
             },
             limitations: Vec::new(),
             size_bytes: None,
@@ -411,6 +518,146 @@ mod tests {
         );
     }
 
+    /// Assistant tool calls and tool results round-trip into Anthropic
+    /// `tool_use` / `tool_result` content blocks for the next round.
+    #[test]
+    fn request_body_serializes_tool_use_and_tool_results() {
+        let conv = Uuid::new_v4();
+        let mut assistant = Message::text(
+            conv,
+            MessageRole::Assistant,
+            "Let me check.",
+            ComputeMode::Hosted,
+            1,
+        );
+        assistant.content.push(ContentBlock::ToolCall {
+            call_id: "toolu_1".to_string(),
+            tool_id: "get_weather".to_string(),
+            args: json!({"city": "Auckland"}),
+        });
+        assistant.content.push(ContentBlock::ToolCall {
+            call_id: "toolu_2".to_string(),
+            tool_id: "get_time".to_string(),
+            args: json!({"tz": "Pacific/Auckland"}),
+        });
+        let mut result_1 = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 2);
+        result_1.content = vec![ContentBlock::ToolResult {
+            call_id: "toolu_1".to_string(),
+            output: json!({"temp_c": 21}),
+        }];
+        let mut result_2 = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 3);
+        result_2.content = vec![ContentBlock::ToolResult {
+            call_id: "toolu_2".to_string(),
+            output: serde_json::Value::String("09:15".to_string()),
+        }];
+
+        let req = InferenceRequest::from_messages(vec![
+            Message::text(conv, MessageRole::User, "Weather?", ComputeMode::Hosted, 0),
+            assistant,
+            result_1,
+            result_2,
+        ]);
+        let body = request_body("claude-fable-5", &req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+
+        // Assistant turn: text block first, then both tool_use blocks.
+        assert_eq!(
+            messages[1],
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                     "input": {"city": "Auckland"}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "get_time",
+                     "input": {"tz": "Pacific/Auckland"}},
+                ],
+            })
+        );
+
+        // Tool results: user turns carrying tool_result blocks keyed by the
+        // tool_use id (consecutive user turns are merged by the API).
+        assert_eq!(
+            messages[2],
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "{\"temp_c\":21}",
+                }],
+            })
+        );
+        assert_eq!(
+            messages[3],
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_2",
+                    "content": "09:15",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn request_body_attaches_image_to_tool_result_for_vision() {
+        let conv = Uuid::new_v4();
+        let mut result = Message::text(conv, MessageRole::Tool, "", ComputeMode::Hosted, 0);
+        result.content = vec![
+            ContentBlock::ToolResult {
+                call_id: "toolu_1".to_string(),
+                output: json!("screenshot captured"),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            },
+        ];
+        let req = InferenceRequest::from_messages(vec![result]);
+        let body = request_body("claude-fable-5", &req);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn thinking_enables_block_grows_max_tokens_and_drops_temperature() {
+        use mahi_contracts::compute::ThinkingConfig;
+        let mut req = sample_request();
+        req.temperature = Some(0.2);
+        req.max_tokens = Some(1024);
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        let body = request_body("claude-fable-5", &req);
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        // max_tokens must exceed the budget; the headroom rule grows it.
+        assert!(body["max_tokens"].as_u64().unwrap() > 4096);
+        // Extended thinking requires the default temperature.
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted when thinking is on: {body}"
+        );
+    }
+
+    #[test]
+    fn no_thinking_keeps_temperature_and_max_tokens() {
+        let mut req = sample_request();
+        req.temperature = Some(0.3);
+        req.max_tokens = Some(512);
+        let body = request_body("claude-fable-5", &req);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 512);
+        assert!((body["temperature"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+    }
+
     #[test]
     fn default_model_is_claude_fable_5() {
         let p = AnthropicProvider::new("sk-test");
@@ -503,6 +750,80 @@ mod tests {
         let args: String = deltas.iter().map(|d| d.args_delta.as_str()).collect();
         assert_eq!(args, r#"{"city":"Auckland"}"#);
         assert_eq!(chunks[2].finish_reason, Some(FinishReason::ToolCall));
+    }
+
+    /// Two parallel tool_use blocks in one assistant message: each block has
+    /// its own index, and input_json_delta events interleave between them.
+    #[test]
+    fn parser_parallel_tool_use_blocks() {
+        let mut parser = AnthropicSseParser::new(ComputeMode::Hosted);
+        let mut chunks = Vec::new();
+        for (event, data) in [
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"get_weather","input":{}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"get_time","input":{}}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"tz\":\"Pacific/"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"Auckland\"}"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"Auckland\"}"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
+        ] {
+            chunks.extend(parser.handle(event, data));
+        }
+        let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+
+        let args_for = |call_id: &str| -> String {
+            chunks
+                .iter()
+                .filter_map(|c| c.tool_call_delta.as_ref())
+                .filter(|d| d.call_id == call_id)
+                .map(|d| d.args_delta.as_str())
+                .collect()
+        };
+        assert_eq!(args_for("toolu_a"), r#"{"city":"Auckland"}"#);
+        assert_eq!(args_for("toolu_b"), r#"{"tz":"Pacific/Auckland"}"#);
+        assert!(chunks
+            .iter()
+            .filter_map(|c| c.tool_call_delta.as_ref())
+            .all(|d| (d.call_id == "toolu_a" && d.tool_id == "get_weather")
+                || (d.call_id == "toolu_b" && d.tool_id == "get_time")));
+        assert_eq!(
+            chunks.last().unwrap().finish_reason,
+            Some(FinishReason::ToolCall)
+        );
     }
 
     #[test]

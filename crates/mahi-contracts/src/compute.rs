@@ -24,6 +24,11 @@ pub struct InferenceRequest {
     pub temperature: Option<f32>,
     pub streaming_hint: bool,
     pub required_caps: CapabilitySet,
+    /// Optional extended-thinking budget. When set, providers that support a
+    /// reasoning/thinking mode let the model deliberate before answering so it
+    /// can tackle longer, more complex tasks; providers without one ignore it.
+    #[serde(default)]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 impl InferenceRequest {
@@ -37,7 +42,53 @@ impl InferenceRequest {
             temperature: None,
             streaming_hint: true,
             required_caps: CapabilitySet::none(),
+            thinking: None,
         }
+    }
+}
+
+/// How much room a model is given to "think" before it answers.
+///
+/// `budget_tokens` is the maximum number of tokens the model may spend on its
+/// internal reasoning. Providers map it to their own knob: Anthropic's
+/// `thinking.budget_tokens`, or a coarse `reasoning_effort` tier for
+/// OpenAI-compatible / Ollama endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    pub budget_tokens: u32,
+}
+
+impl ThinkingConfig {
+    /// A sensible default thinking budget for everyday turns.
+    pub const DEFAULT_BUDGET: u32 = 4096;
+
+    /// A config with the default budget.
+    pub fn enabled() -> Self {
+        Self {
+            budget_tokens: Self::DEFAULT_BUDGET,
+        }
+    }
+
+    /// A config with an explicit budget (clamped to a sane floor).
+    pub fn with_budget(budget_tokens: u32) -> Self {
+        Self {
+            budget_tokens: budget_tokens.max(1024),
+        }
+    }
+
+    /// A coarse `reasoning_effort` tier for OpenAI-compatible endpoints.
+    pub fn reasoning_effort(&self) -> &'static str {
+        match self.budget_tokens {
+            0..=2048 => "low",
+            2049..=8192 => "medium",
+            _ => "high",
+        }
+    }
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self::enabled()
     }
 }
 

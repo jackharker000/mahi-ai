@@ -24,5 +24,7 @@
     <string>Mahi captures the screen so the agent can see what you see when you ask it to act on your Mac.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Mahi controls other apps on your behalf for the tasks you approve.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Mahi uses Accessibility to read on-screen controls and to click, type, and scroll for the tasks you approve.</string>
 </dict>
 </plist>

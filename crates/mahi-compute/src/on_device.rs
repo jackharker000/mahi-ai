@@ -63,6 +63,7 @@ impl OnDeviceProvider {
                 // is checked against this value via `CapabilitySet::satisfied_by`.
                 min_context_window: 4096,
                 code_gen: false,
+                thinking: false,
             },
             limitations: vec![
                 LimitationLabel::NoLocalRepo,

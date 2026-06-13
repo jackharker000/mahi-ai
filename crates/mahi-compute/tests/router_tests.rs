@@ -41,6 +41,7 @@ impl TestProvider {
                 tool_calling: true,
                 min_context_window: 0,
                 code_gen: false,
+                thinking: false,
             },
         }
     }
@@ -108,6 +109,7 @@ fn tool_request() -> InferenceRequest {
         tool_calling: true,
         min_context_window: 0,
         code_gen: false,
+        thinking: false,
     };
     req
 }
