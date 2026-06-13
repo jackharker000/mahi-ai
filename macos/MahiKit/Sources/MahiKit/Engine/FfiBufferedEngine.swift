@@ -137,6 +137,13 @@ public final class FfiBufferedEngine: MahiEngineProtocol, @unchecked Sendable {
         await Task.detached { handle.setContextWindow(contextTokens: ctx) }.value
     }
 
+    public func setThinking(enabled: Bool, budgetTokens: UInt32) async throws {
+        let handle = self.handle
+        await Task.detached {
+            handle.setThinkingConfig(enabled: enabled, budgetTokens: budgetTokens)
+        }.value
+    }
+
     // MARK: Hosted config, goal, compact & subagents
 
     public func setHostedConfig(_ config: HostedConfig?) async throws {

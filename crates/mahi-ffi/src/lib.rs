@@ -981,6 +981,15 @@ impl MahiEngineHandle {
         self.engine.set_context_window(context_tokens as usize);
     }
 
+    /// Toggle extended thinking and set its token budget for subsequent turns.
+    /// When on, capable models (e.g. Anthropic) deliberate within `budget_tokens`
+    /// before answering — better on hard, multi-step tasks — and the reasoning
+    /// is replayed across tool calls. When off, turns are plain. Local models
+    /// without a thinking mode ignore it. Takes effect on the next turn.
+    pub fn set_thinking_config(&self, enabled: bool, budget_tokens: u32) {
+        self.engine.set_thinking_config(enabled, budget_tokens);
+    }
+
     /// Set (empty clears) a persistent goal for `conversation_id` — an
     /// instruction injected into every turn of that conversation, on top of the
     /// default agent prompt. The seam behind the `/goal` control.

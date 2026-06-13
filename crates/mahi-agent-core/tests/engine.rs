@@ -862,3 +862,69 @@ async fn cancellation_finishes_turn_with_cancelled() {
     assert!(saw_delta);
     assert_eq!(reason, Some(FinishReason::Cancelled));
 }
+
+#[tokio::test]
+async fn thinking_toggle_controls_request_thinking() {
+    use mahi_tooling::{MockComputerController, ToolRegistry};
+
+    // A provider that just stops; we only care about the captured request.
+    fn stop_script() -> Vec<Vec<InferenceChunk>> {
+        vec![vec![
+            InferenceChunk::text("ok", ComputeMode::OnDevice),
+            InferenceChunk::finish(FinishReason::Stop, ComputeMode::OnDevice),
+        ]]
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(RecordingProvider::new(stop_script()));
+    let tools = Arc::new(ToolRegistry::with_builtins_scoped(
+        Arc::new(MockComputerController::new()),
+        dir.path(),
+    ));
+    let engine = engine_with(in_memory_datastore(), provider.clone(), tools);
+    let conv = engine
+        .create_conversation(ComputeMode::OnDevice)
+        .await
+        .unwrap();
+
+    // Default: thinking is on, so the request carries a budget.
+    drain(
+        engine
+            .run_turn(conv, "hi".to_string(), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let on = &provider.requests()[0];
+    assert!(on.thinking.is_some(), "thinking should be on by default");
+
+    // Toggle off: the next turn's request has no thinking config.
+    engine.set_thinking_config(false, 0);
+    drain(
+        engine
+            .run_turn(conv, "again".to_string(), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let off = provider.requests();
+    assert!(
+        off.last().unwrap().thinking.is_none(),
+        "thinking should be off after disabling"
+    );
+
+    // Toggle back on with an explicit budget.
+    engine.set_thinking_config(true, 8192);
+    drain(
+        engine
+            .run_turn(conv, "more".to_string(), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let back = provider.requests();
+    assert_eq!(
+        back.last().unwrap().thinking.map(|t| t.budget_tokens),
+        Some(8192)
+    );
+}

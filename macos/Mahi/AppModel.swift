@@ -174,6 +174,18 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Toggle extended thinking and its token budget for subsequent turns.
+    public func setThinking(enabled: Bool, budgetTokens: Int) async {
+        do {
+            try await engine.setThinking(
+                enabled: enabled,
+                budgetTokens: UInt32(max(0, budgetTokens))
+            )
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
     /// Set (empty clears) a persistent goal for the current conversation.
     public func setGoal(_ goal: String) async {
         guard let convID = selectedID else { return }

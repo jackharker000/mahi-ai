@@ -18,7 +18,7 @@ use mahi_contracts::error::{ContractError, StoreError};
 use mahi_contracts::tooling::{ToolDescriptor, ToolEvent, ToolInvocation, ToolInvokeContract};
 use mahi_contracts::types::{CapabilitySet, ComputeMode};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -68,6 +68,23 @@ struct EngineInner {
     /// Per-turn context character budget (~4 chars/token). Runtime-settable so
     /// the user can trade speed for a larger context window (up to ~1M tokens).
     context_budget_chars: AtomicUsize,
+    /// Whether to request extended thinking on each turn (runtime-settable).
+    thinking_enabled: AtomicBool,
+    /// Extended-thinking token budget when enabled (runtime-settable).
+    thinking_budget: AtomicU32,
+}
+
+impl EngineInner {
+    /// The thinking config to apply to the next turn, if enabled.
+    fn thinking_config(&self) -> Option<ThinkingConfig> {
+        if self.thinking_enabled.load(Ordering::Relaxed) {
+            Some(ThinkingConfig::with_budget(
+                self.thinking_budget.load(Ordering::Relaxed),
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 impl MahiEngine {
@@ -80,7 +97,24 @@ impl MahiEngine {
                 device_id: config.device_id,
                 approvals: ApprovalRegistry::default(),
                 context_budget_chars: AtomicUsize::new(CONTEXT_CHAR_BUDGET),
+                // Extended thinking on by default; the surface can toggle it.
+                thinking_enabled: AtomicBool::new(true),
+                thinking_budget: AtomicU32::new(ThinkingConfig::DEFAULT_BUDGET),
             }),
+        }
+    }
+
+    /// Enable or disable extended thinking and set its token budget for
+    /// subsequent turns. A zero/!enabled config turns thinking off; capable
+    /// providers (e.g. Anthropic) deliberate within `budget_tokens` when on.
+    pub fn set_thinking_config(&self, enabled: bool, budget_tokens: u32) {
+        self.inner
+            .thinking_enabled
+            .store(enabled, Ordering::Relaxed);
+        if budget_tokens > 0 {
+            self.inner
+                .thinking_budget
+                .store(budget_tokens.max(1024), Ordering::Relaxed);
         }
     }
 
@@ -468,10 +502,9 @@ impl TurnRunner {
             // TODO(contracts): derive required_caps from the request (vision
             // blocks, tool presence) once content carries richer media types.
             required_caps: CapabilitySet::none(),
-            // Ask for extended thinking by default so capable models can reason
-            // through longer, multi-step tasks; providers without a thinking
-            // mode ignore it.
-            thinking: Some(ThinkingConfig::enabled()),
+            // Extended thinking per the runtime toggle (on by default); capable
+            // providers reason within the budget, others ignore it.
+            thinking: self.inner.thinking_config(),
         }
     }
 
