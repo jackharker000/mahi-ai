@@ -101,6 +101,12 @@ public protocol MahiEngineProtocol: AnyObject, Sendable {
     /// the model. Hosted providers honor very large windows (up to ~1M tokens).
     func setContextWindow(contextTokens: Int) async throws
 
+    /// Toggle extended thinking and set its token budget for subsequent turns.
+    /// When on, capable models (e.g. Anthropic) deliberate before answering and
+    /// the reasoning is preserved across tool calls. Models without a thinking
+    /// mode ignore it.
+    func setThinking(enabled: Bool, budgetTokens: UInt32) async throws
+
     // Hosted (cloud) provider configuration; nil clears it.
     func setHostedConfig(_ config: HostedConfig?) async throws
 
@@ -116,4 +122,10 @@ public protocol MahiEngineProtocol: AnyObject, Sendable {
 
     // Parallel subagents: returns one short result summary per goal.
     func spawnSubagents(goals: [String]) async throws -> [String]
+}
+
+public extension MahiEngineProtocol {
+    /// Default no-op so engines that don't model thinking (e.g. the preview
+    /// mock) don't have to implement it; the real FFI engine overrides this.
+    func setThinking(enabled: Bool, budgetTokens: UInt32) async throws {}
 }

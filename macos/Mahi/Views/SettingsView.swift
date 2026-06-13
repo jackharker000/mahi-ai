@@ -14,6 +14,8 @@ struct SettingsView: View {
     @AppStorage("hostedContextTokens") private var hostedContextTokens: Int = 32768
     // TODO: move to Keychain — @AppStorage is plaintext defaults, fine only for dev.
     @AppStorage("hostedAPIKey") private var hostedAPIKey: String = ""
+    @AppStorage("thinkingEnabled") private var thinkingEnabled: Bool = true
+    @AppStorage("thinkingBudget") private var thinkingBudget: Int = 4096
 
     @State private var didSave = false
     @State private var permissions = (screenRecording: false, accessibility: false)
@@ -106,6 +108,32 @@ struct SettingsView: View {
                 }
 
                 Text("Leave the API key empty and press Save to clear the hosted config.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Thinking") {
+                Toggle("Extended thinking", isOn: $thinkingEnabled)
+                    .onChange(of: thinkingEnabled) { _ in
+                        let enabled = thinkingEnabled
+                        let budget = thinkingBudget
+                        Task { await model.setThinking(enabled: enabled, budgetTokens: budget) }
+                    }
+                if thinkingEnabled {
+                    Picker("Reasoning budget", selection: $thinkingBudget) {
+                        ForEach([1024, 2048, 4096, 8192, 16384, 32768], id: \.self) { tokens in
+                            Text(contextLabel(tokens)).tag(tokens)
+                        }
+                    }
+                    .onChange(of: thinkingBudget) { _ in
+                        let enabled = thinkingEnabled
+                        let budget = thinkingBudget
+                        Task { await model.setThinking(enabled: enabled, budgetTokens: budget) }
+                    }
+                }
+                Text("Lets capable models (e.g. Claude) deliberate before answering on hard, "
+                    + "multi-step tasks. The reasoning is kept across tool calls; local models "
+                    + "without a thinking mode ignore it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
