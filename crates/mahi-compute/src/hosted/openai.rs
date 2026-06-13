@@ -194,11 +194,17 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if let Some(temperature) = req.temperature {
         body["temperature"] = temperature.into();
     }
-    if let Some(thinking) = &req.thinking {
-        // OpenAI-compatible reasoning endpoints (o-series, vLLM, Ollama's
-        // thinking models) accept a coarse `reasoning_effort` tier rather than
-        // a token budget; map the budget onto low/medium/high.
-        body["reasoning_effort"] = thinking.reasoning_effort().into();
+    // Only hint reasoning on tool-free turns: many OpenAI-compatible servers
+    // (and llama.cpp) reject or mishandle `reasoning_effort` alongside a
+    // `tools` array, which would break the agent's tool loop. Tool turns send
+    // a plain request instead.
+    if req.tools.is_none() {
+        if let Some(thinking) = &req.thinking {
+            // OpenAI-compatible reasoning endpoints (o-series, vLLM, Ollama's
+            // thinking models) accept a coarse `reasoning_effort` tier rather
+            // than a token budget; map the budget onto low/medium/high.
+            body["reasoning_effort"] = thinking.reasoning_effort().into();
+        }
     }
     if let Some(tools) = &req.tools {
         body["tools"] = tools
@@ -631,6 +637,26 @@ mod tests {
     fn no_thinking_omits_reasoning_effort() {
         let req = sample_request();
         assert!(request_body("m", &req).get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_is_omitted_when_tools_are_present() {
+        use mahi_contracts::compute::{ThinkingConfig, ToolSpec};
+        let mut req = sample_request();
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        req.tools = Some(vec![ToolSpec {
+            id: "web_search".to_string(),
+            description: "Search the web".to_string(),
+            input_schema: json!({"type": "object"}),
+        }]);
+        let body = request_body("m", &req);
+        // Tool turns must not carry reasoning_effort (breaks the tool loop on
+        // many OpenAI-compatible / llama.cpp servers).
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "reasoning_effort must be omitted when tools are present: {body}"
+        );
+        assert!(body["tools"].is_array());
     }
 
     #[test]

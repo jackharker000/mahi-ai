@@ -174,10 +174,15 @@ pub fn request_body(model: &str, req: &InferenceRequest) -> Value {
     if !system_parts.is_empty() {
         body["system"] = system_parts.join("\n").into();
     }
-    if let Some(thinking) = &req.thinking {
-        // Extended thinking lets the model deliberate before answering. The
-        // Messages API requires `max_tokens > budget_tokens`, so grow the cap
-        // to leave room for both the reasoning and the visible answer.
+    // Extended thinking and tool use can't be combined yet: the Messages API
+    // requires a tool_use assistant turn to replay its original *signed*
+    // thinking block, and we don't persist those. So thinking only applies to
+    // tool-free turns; with tools present we send a normal (non-thinking)
+    // request so multi-step tool loops don't 400.
+    let thinking = req.tools.is_none().then_some(req.thinking).flatten();
+    if let Some(thinking) = thinking {
+        // The Messages API requires `max_tokens > budget_tokens`, so grow the
+        // cap to leave room for both the reasoning and the visible answer.
         let budget = thinking.budget_tokens.max(1024);
         let max = req
             .max_tokens
@@ -645,6 +650,28 @@ mod tests {
             body.get("temperature").is_none(),
             "temperature must be omitted when thinking is on: {body}"
         );
+    }
+
+    #[test]
+    fn thinking_is_omitted_when_tools_are_present() {
+        use mahi_contracts::compute::{ThinkingConfig, ToolSpec};
+        let mut req = sample_request();
+        req.temperature = Some(0.4);
+        req.thinking = Some(ThinkingConfig::with_budget(4096));
+        req.tools = Some(vec![ToolSpec {
+            id: "web_search".to_string(),
+            description: "Search the web".to_string(),
+            input_schema: json!({"type": "object"}),
+        }]);
+        let body = request_body("claude-fable-5", &req);
+        // Thinking + tool_use needs signed thinking blocks we don't persist, so
+        // tool turns must NOT enable thinking (and temperature is honored).
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be omitted when tools are present: {body}"
+        );
+        assert!(body["tools"].is_array());
+        assert!((body["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
     }
 
     #[test]
